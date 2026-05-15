@@ -1,0 +1,158 @@
+Inputfile metabolic network model for sponges; doi: 10.3389/fmars.2020.596251
+data for smaller G. barretti from Bart et al. 2020 doi: 10.1002/lno.11652
+unit umol/cm3 n-c-o ; fluxes umol/cm3/d
+					
+## Parameters
+!Measurements
+Oxyupt		=		11.150		!Chondrosia reniformis central value from summary table using median_ci_non_negative
+NH4upt		=		0.000		!Chondrosia reniformis central value from summary table using symmetric_zero
+NO2upt		=		-0.081		!derived from total NOx using Kluijver 2020 partition
+NO3rel		=		-0.969		!derived from total NOx using Kluijver 2020 partition
+DOCupt		=		0.000		!Chondrosia reniformis central value from summary table using symmetric_zero
+BacCupt		=		2.280		!Chondrosia reniformis derived as Bact_C + Syn_C + Pro_C + PEuk_C + NEuk_C using component-wise rules
+
+!Stoichiometry
+CN_Spo		=		3.273		!Chondrosia reniformis CN_Spo from table3
+NC_Spo		=		0.306		!Derived as 1/CN_Spo
+CN_DOM		=		26.270		!Chondrosia reniformis central value from ratio table using q05_q95_ratio_non_negative
+CN_Bac		=		6.600		!Redfield ratio
+
+!rates
+fr_C_Bac		=		0.778
+fr_C_DOM		=		0.638
+fp_N_Bac		=		0.279
+fp_N_DOM		=		0.577
+fex_N_Bac		=		0.721
+fex_N_DOM		=		0.423
+RQ		=		0.933		!Chondrosia reniformis central value from RQ_model_pH using q05_q95_ratio_non_negative
+DenitEff		=		0.800		!mole NO3 used per mole C, (Soetaert et al. 1996)
+DNRAeff		=		0.560		!Koeve Kahler Redfield
+fp_N_Denit		=		0.410		!range 0.1-0.6
+fp_N_DNRA		=		0.403		!range 0.05-0.4
+fex_N_Denit		=		0.590
+fex_N_DNRA		=		0.597
+fr_C_Denit		=		0.743
+fr_C_DNRA		=		0.747
+Cfix_nit1		=		0.062		!Thaumarchaea; Zhang et al. 2020
+Cfix_nit2		=		0.018		!Prosser 2005; Zhang et al. 2020
+Cfix_ana		=		0.052		!Prosser 2005
+
+!sampling ranges used by R script
+CN_DOM_min		=		18.829		!Chondrosia reniformis lower bound from ratio table using q05_q95_ratio_non_negative
+CN_DOM_max		=		33.711		!Chondrosia reniformis upper bound from ratio table using q05_q95_ratio_non_negative
+RQ_min		=		0.487		!Chondrosia reniformis lower bound from rq table using q05_q95_ratio_non_negative
+RQ_max		=		1.380		!Chondrosia reniformis upper bound from rq table using q05_q95_ratio_non_negative
+Oxyupt_min		=		8.400		!Chondrosia reniformis lower bound from summary table using median_ci_non_negative
+Oxyupt_max		=		13.900		!Chondrosia reniformis upper bound from summary table using median_ci_non_negative
+DOCupt_min		=		-13.150		!Chondrosia reniformis lower bound from summary table using symmetric_zero
+DOCupt_max		=		13.150		!Chondrosia reniformis upper bound from summary table using symmetric_zero
+NH4upt_min		=		-1.600		!Chondrosia reniformis lower bound from summary table using symmetric_zero
+NH4upt_max		=		1.600		!Chondrosia reniformis upper bound from summary table using symmetric_zero
+NOx_min		=		-1.420		!Chondrosia reniformis lower bound total NOx using median_ci
+NOx_max		=		-0.680		!Chondrosia reniformis upper bound total NOx using median_ci
+BacCupt_min		=		0.450		!Chondrosia reniformis lower bound from cellular carbon groups using component-wise rules
+BacCupt_max		=		4.110		!Chondrosia reniformis upper bound from cellular carbon groups using component-wise rules
+DICrel_min		=		-14.650		!Chondrosia reniformis lower bound from DIC_pH using median_ci
+DICrel_max		=		-11.150		!Chondrosia reniformis upper bound from DIC_pH using median_ci
+
+!helpers for NOx partition
+orig_NO2		=		-0.114		!Kluijver 2020 partition helper
+orig_NO3		=		-1.356		!Kluijver 2020 partition helper
+
+## End parameters
+
+## Components
+!Organic pools
+	SPO	
+	DOM
+	
+!Inorganic pools
+	OXY
+	NH4
+	NO3
+	NO2
+	N2
+	CO2
+	
+## End components
+
+### EXTERNAL
+!Organic externals
+	Bacw												
+	DOMw												
+	Production
+	
+!Inorganic externals
+	OXYw
+	NH4w
+	NO3w
+	NO2w
+	N2w
+	CO2w
+### END EXTERNAL
+
+### REACTIONS
+!sponge metabolism													
+r1 : Bacw + fr_C_Bac *CN_Bac * OXY * RQ	-> fp_N_Bac * SPO + fr_C_Bac *CN_Bac * CO2 + fex_N_Bac * NH4 	!POM assimilation
+r2 : DOM + fr_C_DOM * CN_DOM* OXY * RQ	-> fp_N_DOM * SPO + fr_C_DOM * CN_DOM * CO2 + fex_N_DOM * NH4	!DOM assimilation											
+!heteroptrophic processes
+r3 : DOM + CN_DOM * DenitEff * fr_C_Denit * NO3 -> fr_C_Denit* CN_DOM * CO2 + fp_N_Denit*SPO + 0.5* fr_C_Denit * CN_DOM * DenitEff * N2  	+fex_N_Denit * NH4		!denitrification    
+r4 : DOM + CN_DOM * DNRAeff  * fr_C_DNRA * NO3  -> fr_C_DNRA* CN_DOM * CO2 + fp_N_DNRA * SPO + CN_DOM * DNRAeff  * fr_C_DNRA * NH4  + fex_N_DNRA * NH4 !DNRA
+   
+!autotrophic processes		
+r5 : NH4  + 1.5*OXY  		-> NO2 	! nitrification
+r6 : NO2  + 0.5*OXY 		-> NO3 	! nitrification	
+r7 : NH4 + CN_Spo * CO2 	-> SPO	! biomass production from nitrification
+r8	: NO2  +  NH4  		-> N2  	! Anammox
+r9: 19.4* NO2 + CN_Spo * CO2 -> SPO + 16.1 * NO3 + 1.2*N2	
+	! biomass production from anammox
+
+!closure term for sponge production 
+r10 : SPO				-> Production	!Production
+
+!exchange with the rest of the world
+r11: DOMw <-> DOM
+r12: OXYw  <-> OXY
+r13: NH4w  <-> NH4
+r14: NO3w  <-> NO3
+r15: NO2w  <-> NO2
+r16: CO2w  <-> CO2
+
+!only efflux to the rest of the world
+r17: N2    -> N2w
+
+### END REACTIONS
+
+## Equalities
+!flux data	here you can provide one number
+r1 * CN_Bac = BacCupt 
+r11 *CN_DOM = DOCupt
+r12 		= 	Oxyupt      	! oxygen consumption
+r13 		= 	NH4upt		! ammonium consumption
+r14 		= 	NO3rel          ! efflux of nitrate
+r15 		= 	NO2upt          ! nitrite consumption
+r7		= 	Cfix_nit1*NC_Spo*r5 + Cfix_nit2*NC_Spo*r6 	! biomass production from nitrification
+r9 		= 	Cfix_ana*NC_Spo*r8					! biomass production from anammox
+## End Equalities
+
+
+### INEQUALITY
+! soft data (literature, other studies) 
+
+!positivity of reactions
+r1  > 0
+r2  > 0
+r3  > 0
+r4  > 0
+r5  > 0
+r6  > 0
+r7  > 0
+r8  > 0
+r9  > 0
+r10 > 0
+
+r8*5<r3
+r3<r2
+r4<r2
+	
+### END INEQUALITY
