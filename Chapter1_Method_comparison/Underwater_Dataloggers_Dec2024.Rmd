@@ -1,0 +1,1624 @@
+---
+title: "Underwater_Dataloggers_Dec2024"
+author: "Raz"
+date: "2025-02-10"
+output: html_document
+---
+
+
+#packages
+```{r setup, include=FALSE}
+
+#knitr::opts_knit$set(root.dir)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(data.table)
+library(openxlsx)
+library(ggplot2)
+library(tidyverse)
+library(seacarb)
+library(hms)
+library(scales)
+library(RColorBrewer)
+library(patchwork)
+library(Hmisc)
+library(zoo)
+library(capl)
+library(ggpubr)
+library(googlesheets4)
+library(ggpmisc)
+
+#Rmarkdown assembly
+library(rmdformats)
+library(rmarkdown)
+library(knitr)
+library(formattable)
+library(kableExtra)
+library(tinytex) #if this installation does not work, read section below in RStudio 
+
+```
+
+ ##יצירת קובץ משותף לכל הלוגרים 
+```{r}
+# Choose the directory with the current txt files
+
+#setwd(choose.dir())
+setwd("C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Underwater Dataloggers")
+
+
+#getwd()
+# Create a list with all the txt files
+filelist = list.files(pattern = ".*.txt")
+
+# A vector of the column names 
+column_names <- c("DateTime",
+                  "Fraction of Second (ms)",
+                  "Comment",
+                  "status",
+                  "dphi (0.001 <b0>)",
+                  "umolar (0.001 umol/L)",
+                  "mbar (0.001 mbar)",
+                  "airSat (0.001 %air sat)",
+                  "tempSample (0.001 C)",
+                  "tempCase (0.001 C)",
+                  "signalIntensity (0.001 mV)",
+                  "ambientLight (0.001 mV)",
+                  "pressure (0.001 mbar)",
+                  "humidity (0.001 %RH)",
+                  "resistorTemp (0.001 Ohm or 0.001 mV)",
+                  "percentO2 (0.001 %O2)",
+                  "tempOptical (0.001 C)",
+                  "pH (0.001 pH)",
+                  "ldev (0.001 nm)",
+                  "-",
+                  "-") 
+
+# Create a dataframe from each txt file and add a column with the file name for identification
+ldf = lapply(filelist, function(x) {
+  
+  dat = read.table(x, sep = "\t", skip = 37, col.names = column_names)
+  
+  # Add a column with the file name
+  dat$File_name = substr(x,1,8)
+  
+  return(dat)
+})
+
+# Combine all the dataframes created in the previous function to a uniform database 
+datafr = do.call("rbind", ldf)
+
+# Create a clean data with the desired variables (file_name, dphi, oxygen conc., temp and pH)
+datafr_clean <- datafr %>% 
+  relocate(File_name, .before = `DateTime`) %>% 
+  dplyr::select(File_name, `DateTime`, `dphi..0.001..b0..`, `umolar..0.001.umol.L.`, `tempSample..0.001.C.`, `pH..0.001.pH.`) %>% 
+  mutate(
+    dphi = `dphi..0.001..b0..` / 1000,
+    umol.L. = `umolar..0.001.umol.L.` / 1000,
+    Temp.C = `tempSample..0.001.C.` / 1000,
+    pH = `pH..0.001.pH.` / 1000
+  ) %>%
+  dplyr::select(-c(`dphi..0.001..b0..`, `umolar..0.001.umol.L.`, `tempSample..0.001.C.`, `pH..0.001.pH.`))
+
+# Define the date and time format as y-m-d hh:mm:ss
+datafr_clean$DateTime <- ymd_hms(datafr_clean$DateTime)#, tz = "Europe/Paris")
+
+datafr_clean <- datafr_clean %>%
+  mutate(Optode = gsub("181224", "", File_name))
+
+
+
+```
+
+
+```{r, fig.width=10,fig.height=20}
+
+# מציינים את כתובת הקישור לקובץ ואת שם הגיליון
+sheet_url <- "https://docs.google.com/spreadsheets/d/164Dash5TdocrxAnGAPAIEubC47uzU2vTi7gSytMWDjE/edit?gid=324193792#gid=324193792"
+sheet_name <- "Log_Oxygen_loggers"
+
+# מושכים את הנתונים ישירות ל-R
+meta_loggers_data <- read_sheet(sheet_url, sheet = sheet_name)
+
+# תחילה, נמיר את העמודות הרלוונטיות לפורמט תאריך ושעה, אם לא נעשה זאת קודם לכן
+
+meta_loggers_data<- meta_loggers_data %>%
+      mutate(Start_Date = as.Date(Start_Date, format = "%d/%m/%Y"),
+             End_Date = as.Date(End_Date, format = "%d/%m/%Y"),
+             Start_Time = hms::as_hms(Start_Time),
+             End_Time = hms::as_hms(End_Time),
+             Start = as.POSIXct(Start),
+             End = as.POSIXct(End))
+
+
+long_meta_loggers_data <- meta_loggers_data %>%
+  pivot_longer(
+    cols = c("Optode_In","Optode_Ex"), 
+    names_to = c("InEx"),
+    values_to = "Optode"
+  ) 
+
+long_meta_loggers_data$InEx <- gsub("Optode_", "", long_meta_loggers_data$InEx)
+
+
+
+
+# שילוב הנתונים לפי Optode
+merged_data <- left_join(datafr_clean, long_meta_loggers_data, by = "Optode")
+
+# סינון השורות שבהן DateTime נמצא בין Start ל-End
+filtered_data <- merged_data %>%
+  filter(DateTime >= Start & DateTime <= End) %>%
+  mutate(InEx = ifelse(grepl("Cross", Measurement), "Cross", InEx))
+
+
+
+```
+
+
+
+
+
+### Cross-calibrations ###
+```{r, fig.width=10,fig.height=5}
+
+
+# הגדרת צבעים מותאמים אישית
+custom_colors <- c("03" = "#7AC5CD", "04" = "#483D8B", "06" = "#8B0A50", "12"="#CD5B45" )
+
+# Create a data of only cross calibrations
+cross_cal <- filtered_data %>% 
+  filter(Measurement == "Cross") %>% 
+  mutate(rounddatetime = round_date(DateTime, "10 second")) %>% # Rounds the time to 10 seconds
+  dplyr::select(Species,Sponge_num,Species_Sponge,Measurement,   
+         Start_Date,Start_Time,Start,End_Date,End_Time,End,rounddatetime,Temp.C,
+         InEx,Optode,umol.L.) %>% 
+  mutate_at(c("umol.L."), ~na_if(., 0))
+
+#filtered_loggers_data <- loggers_data %>%
+ # filter(!(Measurement == "Cross" & Start == as.POSIXct("2024-12-20 16:10:00")))
+
+
+filtered_cross_cal <- cross_cal %>%
+  filter(Start != as.POSIXct("2024-12-20 16:10:00"))
+
+
+# plot the oxygen over time for each cross-calibration
+cross_plot<-cross_cal %>% 
+  group_by(Start, End, rounddatetime) %>% 
+  mutate(scaled_umol = umol.L. - median(umol.L., na.rm = T )) %>%
+  filter(!is.na(scaled_umol)) %>% 
+  ggplot()+
+  aes(x = rounddatetime , y = umol.L., color = Optode)+
+  scale_color_manual(values = custom_colors) + # בחירת צבעים מותאמים אישית
+  geom_point(alpha = 0.3,size =3)+
+  coord_cartesian(ylim = c(150, 250))+
+  labs(x = "", y = "Oxygen Concentration (µmol/L)") +
+  facet_wrap(~ interaction(Start, End), scales = "free")+ 
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, color = "black"),
+      legend.key = element_rect(fill = "white", color = NA, size = 30),
+      legend.title = element_text(size = 15),
+      legend.text = element_text(size = 15, face = "italic"), 
+      legend.position = "none" ,
+      panel.background = element_blank(), 
+      axis.line = element_line(colour = "black"),
+      strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+      strip.text = element_text(size = 7, face = "italic"), # שינוי גודל הכתב של ה-facet
+      axis.title.y = element_text(size = 10),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+# שמירה כקובץ PNG
+ggsave("cross_plot.png", plot = cross_plot, width = 10, height = 10, dpi = 300)
+
+cross_plot
+
+corrections <- cross_cal %>% 
+  group_by(Start, End, rounddatetime) %>% 
+  mutate(scaled_umol = umol.L. - median(umol.L., na.rm = T)) %>%   
+  group_by(Start, End, Optode) %>% 
+  summarise(median_cross_umol = median(scaled_umol)) %>% 
+  ungroup()
+
+corrections <- corrections %>%
+  filter(!(Start == as.POSIXct("2024-12-20 16:10:00") | Optode == "01"| Optode == "02"))
+
+filtered_data <- filtered_data %>%
+  filter(!( Optode == "01"| Optode == "02"))
+
+filtered_data2 <- left_join(filtered_data, corrections) %>% 
+  mutate(umol_median_cross_down = median_cross_umol,
+         umol_median_cross_up = median_cross_umol) %>%  
+  fill(umol_median_cross_down, .direction = "down") %>%
+  fill(umol_median_cross_up, .direction = "up") %>%
+  rowwise() %>% 
+  mutate(median_cross_umol = median(c(umol_median_cross_down, umol_median_cross_up), 
+                                    na.rm = T)) %>% 
+  mutate_at(c('umol.L.'), ~na_if(., 0)) %>% 
+  mutate(corrected_umol = umol.L. - median_cross_umol) 
+
+loggers_data <- filtered_data2 %>% 
+ dplyr::select(-c(median_cross_umol, umol_median_cross_down, umol_median_cross_up))  
+
+cross_cal_plot<-loggers_data %>% 
+  filter(Measurement== "Cross") %>% 
+  ggplot()+
+  aes(x = DateTime , y = corrected_umol, color = Optode)+
+  geom_point(alpha = 0.3,size =3)+
+  scale_color_manual(values = custom_colors) + # בחירת צבעים מותאמים אישית
+   coord_cartesian(ylim = c(150, 250))+
+  labs(x = "", y = "Oxygen Concentration (µmol/L)") +
+  facet_wrap(~ interaction(Start, End), scales = "free")+
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, color = "black"),
+      legend.key = element_rect(fill = "white", color = NA, size = 30),
+      legend.title = element_text(size = 15),
+      legend.text = element_text(size = 15, face = "italic"), 
+      legend.position = "bottom",  # הצגת המקרא למטה
+      legend.direction = "vertical",  # מקרא אנכי
+      legend.box = "vertical",
+      panel.background = element_blank(), 
+      axis.line = element_line(colour = "black"),
+      strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+      strip.text = element_text(size = 7, face = "italic"), # שינוי גודל הכתב של ה-facet
+      axis.title.y = element_text(size = 10),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+cross_cal_plot
+
+
+
+# שילוב הגרפים – `patchwork`
+cross_combined_plot <- cross_plot / cross_cal_plot + 
+  plot_layout(guides = "collect")  # מוודא שהמקרא יוצג רק פעם אחת
+
+
+# שמירה כקובץ PNG
+ggsave("cross_combined_plot.png", plot = cross_combined_plot, width = 10, height = 10, dpi = 300)
+
+
+
+cross_combined_plot
+
+
+```
+
+
+```{r, fig.width=10,fig.height=10}
+
+
+
+corrected_umol_plot<-ggplot(loggers_data, aes(x = DateTime, y = corrected_umol, color = InEx)) +
+  geom_point() +
+  facet_wrap(~ interaction(Species_Sponge, Start), scales = "free") +
+  labs(x = "Date & Time", y = "Oxygen Concentration (µmol/L)", 
+       title = "Oxygen Concentration Over Time by Species Sponge and Start Time") +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, color = "black"),
+      legend.key = element_rect(fill = "white", color = NA, size = 30),
+      legend.title = element_text(size = 15),
+      legend.text = element_text(size = 10, face = "italic"), 
+      panel.background = element_blank(), 
+      axis.line = element_line(colour = "black"),
+      strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+      strip.text = element_text(size = 5, face = "italic"), # שינוי גודל הכתב של ה-facet
+      axis.title.y = element_text(size = 15),
+      axis.title.x = element_text(size = 15),
+      axis.text.y = element_text(size = 10),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+
+# שמירה כקובץ PNG
+ggsave("corrected_umol_plot.png", plot = corrected_umol_plot, width = 10, height = 10, dpi = 300)
+
+
+corrected_umol_plot
+
+
+```
+
+### calculates delta for long format data###
+```{r, fig.width=10,fig.height=10}
+
+oxygen_delta <- loggers_data %>%
+  mutate(rounddatetime = round_date(DateTime, "10 second")) %>% # עיגול זמן ל-10 שניות
+  group_by(Species_Sponge, Measurement, Unique_Code, Species, Sponge_num, Species_volume, Start, End, rounddatetime) %>%
+  filter(n() == 2 & all(c("In", "Ex") %in% InEx)) %>%  # בודק שיש זוג עם In ו- Ex
+  summarise(
+    delta = corrected_umol[InEx == "In"] - corrected_umol[InEx == "Ex"], # חישוב הדלתא
+    mean_temp = mean(Temp.C, na.rm = TRUE), # חישוב ממוצע הטמפרטורה
+    rounddatetime = first(round_date(DateTime, "10 second")), # שמירת זמן מעוגל
+    .groups = "drop"
+  )
+
+
+# אם כל הערכים אותו הדבר (או character/number רגיל בתוך list)
+oxygen_delta <- oxygen_delta %>%
+  mutate(
+    Species_volume = sapply(Species_volume, function(x) {
+      if (length(x) == 0 || is.null(x)) {
+        return(NA_real_)
+      } else {
+        return(as.numeric(x))
+      }
+    })
+  )
+
+saveRDS(oxygen_delta, file = "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/Eilat2024_oxygen_delta.rds")
+
+custom_colors <- c(
+  "D.erythraeanus_55" = "#e28743",
+  "D.erythraeanus_59" = "#ea6f16",
+  "D.erythraeanus_60" = "#9c4709",
+  "D.erythraeanus_33" = "#A0522D",
+  "D.erythraeanus_48" = "#FFA500",
+  "D.erythraeanus_54" = "#CD853F",
+  "D.erythraeanus_69" = "#FFC125",
+  "D.erythraeanus_89" = "#EE7942",
+  "D.erythraeanus_81" = "#FFA54F",
+  "D.erythraeanus_88" = "#EE7600",
+  "D.erythraeanus_105" = "#BD6B2C",
+  "C.siphonella_50"= "#7CB9E8",
+  "C.siphonella_68"= "#72A0C1",
+  "C.siphonella_102"= "#007FFF",
+  "C.siphonella_34" = "#89CFF0",
+  "C.siphonella_40"  = "#0066b2",
+   "C.siphonella_39"= "#5072A7" ,
+  "C.siphonella_6" = "#13274F",
+  "C.siphonella_38"= "#5F9EA0", 
+  "C.siphonella_0" = "#0CAFFF",
+  "C.siphonella_95"= "#1F75FE",
+  "C.siphonella_80" = "#008E97",
+  "C.siphonella_62"= "#2c3968"
+)
+
+# יצירת האיור ושמירה כאובייקט
+oxygen_plot <- oxygen_delta %>% 
+ # filter(InEx != "In") %>% 
+  ggplot() +
+  aes(x = rounddatetime, y = delta, col = Species_Sponge) + 
+  geom_point(alpha = .7, size = 5) + 
+  facet_wrap(~ interaction(Species_Sponge, Start), scales = "free") +
+   geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) + 
+  scale_color_manual(values = custom_colors) + 
+   labs(x ="" ,y = expression(Delta*O[2] ~(mu*mol~L[p]^-1)),colour= "")+
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, color = "black"),
+      legend.key = element_rect(fill = "white", color = NA, size = 30),
+      legend.title = element_text(size = 10),
+      legend.text = element_text(size = 10, face = "italic"), 
+      panel.background = element_blank(), 
+      axis.line = element_line(colour = "black"),
+      strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+      strip.text = element_text(size = 7, face = "italic"),
+      axis.title.y = element_text(size = 20),
+      axis.title.x = element_text(size = 20),
+      axis.text.y = element_text(size =20),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+  ) 
+
+
+# שמירה כקובץ PNG
+ggsave("oxygen_plot .png", plot = oxygen_plot , width =13 , height = 10, dpi = 300)
+
+oxygen_plot 
+
+# יצירת האיור ושמירה כאובייקט
+oxygentemp_plot <- oxygen_delta %>% 
+ # filter(InEx != "In") %>% 
+  ggplot() +
+  aes(x = mean_temp, y = delta, col = Species_Sponge) + 
+  geom_point(alpha = .7, size = 5) + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) +  # קו אופקי
+   scale_color_manual(values = custom_colors) + 
+   labs(x ="" ,y = expression(Delta*O[2] ~(mu*mol~L[p]^-1)),colour= "")+
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, color = "black"),
+      legend.key = element_rect(fill = "white", color = NA, size = 30),
+      legend.title = element_text(size = 10),
+      legend.text = element_text(size = 10, face = "italic"), 
+      panel.background = element_blank(), 
+      axis.line = element_line(colour = "black"),
+      strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+      strip.text = element_text(size = 7, face = "italic"),
+      axis.title.y = element_text(size = 10),
+      axis.title.x = element_text(size = 10),
+      axis.text.y = element_text(size = 10),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+  ) 
+
+
+# שמירה כקובץ PNG
+ggsave("oxygentemp_plot.png", plot = oxygentemp_plot, width = 10, height = 6, dpi = 300)
+
+
+oxygentemp_plot
+
+
+oxygen_boxplot <- ggplot(oxygen_delta, aes(x = Species_Sponge, y = delta, fill = Species_Sponge)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) +  # קו אופקי
+  labs(x = "", y = expression(Delta*O[2] ~(mu*mol~L[p]^-1)), fill = "") +
+  scale_fill_manual(values = custom_colors) +
+  facet_wrap(~ Species, scales = "free") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 30),
+    legend.title = element_text(size = 25),
+    legend.text = element_text(size = 25, face = "italic"), 
+   legend.position = "none",
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    strip.text = element_text(size = 15, face = "italic"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# שמירה כקובץ PNG
+ggsave("oxygen_boxplot.png", plot = oxygen_boxplot, width = 15, height = 10, dpi = 300)
+
+oxygen_boxplot
+
+
+
+```
+
+
+```{r, fig.width=20,fig.height=10}
+
+# מציינים את כתובת הקישור לקובץ ואת שם הגיליון
+sheet_url <- "https://docs.google.com/spreadsheets/d/164Dash5TdocrxAnGAPAIEubC47uzU2vTi7gSytMWDjE/edit?gid=452849531#gid=452849531"
+sheet_name <- "DFS_log"
+
+# מושכים את הנתונים ישירות ל-R
+DFSmeta_data <- read_sheet(sheet_url, sheet = sheet_name)
+
+
+ DFSmeta_data<-  DFSmeta_data %>%
+      mutate(Date = as.Date(Date, format = "%Y-%m-%d"),
+             Time = hms::as_hms(Time),
+             rounddatetime_min = as.POSIXct(paste(Date, Time)))
+ 
+ 
+ saveRDS(DFSmeta_data, "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/Eilat2024_OFR_data.rds")
+
+DFS_plot <- DFSmeta_data %>%
+  ggplot(aes(x = rounddatetime_min, y = `OFR_(L _hr-1)`, color = Species_Sponge)) +
+  geom_point(alpha = 0.7, size = 5) +
+ # facet_wrap(~ interaction(Species_Sponge, Date), scales = "free") +
+  scale_color_manual(values = custom_colors) +  # הוספת צבעים מותאמים אישית
+  labs(x = "", y = expression(OFR~(L~hr^{-1})), color = "Species Sponge") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 30),
+    legend.title = element_text(size = 25),
+    legend.text = element_text(size = 25, face = "italic"), 
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    strip.text = element_text(size = 7, face = "italic"),
+    axis.title.y = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+
+# שמירה כקובץ PNG
+ggsave("DFS_plot.png", plot = DFS_plot, width = 15, height = 10, dpi = 300)
+
+# הצגת האיור
+DFS_plot
+ 
+
+DFSfacet_plot <- DFSmeta_data %>%
+  ggplot(aes(x = rounddatetime_min, y = `OFR_(L _hr-1)`, color = Species_Sponge)) +
+  geom_point(alpha = 0.7, size = 5) +
+ facet_wrap(~ interaction(Species_Sponge, Date), scales = "free") +
+  scale_color_manual(values = custom_colors) +  # הוספת צבעים מותאמים אישית
+  labs(x = "", y = expression(OFR~(L~hr^{-1})), color = "Species Sponge") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 30),
+    legend.title = element_text(size = 25),
+    legend.text = element_text(size = 25, face = "italic"), 
+    legend.position = "none",
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    strip.text = element_text(size = 15, face = "italic"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+
+# שמירה כקובץ PNG
+ggsave("DFSfacet_plot.png", plot = DFSfacet_plot, width = 15, height = 10, dpi = 300)
+
+# הצגת האיור
+DFSfacet_plot
+
+```
+
+
+
+
+```{r, fig.width=20,fig.height=10} 
+
+
+# יצירת עמודה חדשה עם זמן מעוגל ללא שניות
+oxygen_delta <- oxygen_delta %>%
+  mutate(rounddatetime_min = floor_date(rounddatetime, unit = "minute"))
+
+
+# איחוד בין oxygen_delta ל- DFSmeta_data לפי העמודות המשותפות
+Underwater_combined_data <- left_join(oxygen_delta,  DFSmeta_data, 
+                           by = c("Species_Sponge", "Sponge_num", "Species","rounddatetime_min"))
+
+# המרת הרשימה לווקטור תוך החלפת NULL ל-NA והמרה למספר
+#Underwater_summary_data <- Underwater_summary_data %>%
+ # mutate(Species_volume = as.numeric(unlist(replace(Species_volume, sapply(Species_volume, is.null), NA))))
+
+# חישוב ממוצע OFR_(L _hr-1) לפי Species, Sponge_num, Species_Sponge
+DFSmeta_summary <- DFSmeta_data %>%
+  group_by(Species, Sponge_num, Species_Sponge) %>%
+  summarise(mean_OFR_L_hr = mean(`OFR_(L _hr-1)`, na.rm = TRUE), .groups = "drop")
+
+# חישוב ממוצע oxygen_delta
+oxygen_delta_summary <- oxygen_delta %>%
+  group_by(Species, Sponge_num, Species_Sponge,Measurement,Unique_Code,Species_volume,Start,End) %>%
+  summarise(mean_delta = mean(`delta`, na.rm = TRUE), .groups = "drop",
+            mean_temp= mean(`mean_temp`, na.rm = TRUE))
+  
+
+# איחוד בין oxygen_delta ל- DFSmeta_summary לפי העמודות המשותפות
+Underwater_summary_data <- left_join(oxygen_delta_summary,  DFSmeta_summary, 
+                           by = c("Species_Sponge", "Sponge_num", "Species"))
+
+
+# המרת הרשימה לווקטור תוך החלפת NULL ב- NA, המרת טקסט למספרים, ושמירה על מספר השורות
+Underwater_summary_data <- Underwater_summary_data %>%
+  mutate(Species_volume = as.numeric(unlist(replace(Species_volume, sapply(Species_volume, is.null), NA))))
+
+
+
+# יצירת עמודה חדשה עם חישוב הנשימה
+Underwater_summary_data <- Underwater_summary_data %>%
+  mutate(respiration_umol_hr_ml = (mean_delta * mean_OFR_L_hr) / Species_volume)
+
+
+respiration_boxplot <- ggplot(Underwater_summary_data , aes(x = Species_Sponge, y = respiration_umol_hr_ml, fill = Species_Sponge)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) +  # קו אופקי
+  labs(
+    x = "", 
+    y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+    color = ""
+  ) +
+  scale_fill_manual(values = custom_colors) +
+  facet_wrap(~ Species, scales = "free") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 30),
+    legend.title = element_text(size = 25),
+    legend.text = element_text(size = 25, face = "italic"), 
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    strip.text = element_text(size = 7, face = "italic"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# שמירה כקובץ PNG
+ggsave("respiration_boxplot.png", plot = respiration_boxplot, width = 15, height = 10, dpi = 300)
+
+respiration_boxplot
+
+write_rds(Underwater_summary_data,"C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/Underwater_summary_data.rds")
+# חישוב ממוצע ורווח בר סמך לכל Species_Sponge
+summary_data <- Underwater_summary_data %>%
+  group_by(Species_Sponge, Species) %>%
+  summarise(
+    mean_respiration = mean(respiration_umol_hr_ml, na.rm = TRUE),
+    se_respiration = sd(respiration_umol_hr_ml, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# יצירת האיור עם ממוצעים ורווחי בר סמך
+respiration_summary_plot <- ggplot(summary_data, aes(x = Species_Sponge, y = mean_respiration, fill = Species_Sponge)) +
+  geom_point(size = 5, shape = 21, color = "black") +  # נקודות ממוצע
+  geom_errorbar(aes(ymin = mean_respiration - se_respiration, ymax = mean_respiration + se_respiration), width = 0.2) +  # רווח בר סמך
+  scale_fill_manual(values = custom_colors) +
+  facet_wrap(~ Species, scales = "free") +
+  labs(
+    x = "", 
+    y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+    fill = ""
+  ) +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 30),
+    legend.title = element_text(size = 25),
+    legend.text = element_text(size = 25, face = "italic"), 
+     legend.position = "none",
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    strip.text = element_text(size = 15, face = "italic"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+# שמירה כקובץ PNG
+ggsave("respiration_summary_plot.png", plot = respiration_summary_plot, width = 13, height = 10, dpi = 300)
+
+
+# הצגת האיור
+respiration_summary_plot
+
+
+```
+
+```{r, fig.width=10,fig.height=10}
+
+Lilach_Data<- read.csv("C:/Users/ASUS/Google Drive/Sponge/Data Analysis/Lilach/oxigen/respiration/Lilach_respiration.csv")
+
+
+Lilach_Data<-Lilach_Data %>%
+      mutate(Date = as.Date(Date, format = "%d/%m/%Y"))
+
+# קיבוץ הנתונים וחישוב ממוצע לכל עמודה מספרית
+Lilach_Data_summary <- Lilach_Data %>%
+  group_by(Date, strat_end, habitat, aquria,Treatment, Sponge) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop")
+
+
+
+Lilach_Data_summary <- Lilach_Data_summary %>%
+  mutate(
+    volume = Weight * 20,  # אם העמודה עדיין לא קיימת, נוסיף אותה
+    Respiration = (Delta * OFR) / volume  # חישוב Respiration
+  )
+
+
+
+
+Lilach_Data_summary <- Lilach_Data_summary %>%
+  mutate(Temp = case_when(
+    Treatment == "CONTROL" ~ 24,
+    Treatment == "D2" ~ 26,
+    Treatment == "D6" ~ 30,
+    TRUE ~ NA_real_  # אם יש ערכים אחרים ב-Treatment, הם יקבלו NA
+  ))
+
+
+boxplot_delta <- ggplot(Lilach_Data_summary, aes(x = as.factor(Temp), y = Delta, fill = strat_end, color = strat_end)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.75)) +  # קופסאות מסודרות לפי strat_end
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +  # נקודות נשארות בתוך הקופסה
+  scale_fill_manual(values = c("start" = "#483D8B", "end" =  "#8B0A50")) +  # צבעים לקופסאות
+  scale_color_manual(values = c("start" = "#483D8B", "end" =  "#8B0A50")) +  # צבעים לנקודות
+  labs(x = "", y = expression(Delta*O[2] ~(mu*mol~L[p]^-1)), fill = "", color = "") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(hjust = 1, size = 10)
+  )
+
+# שמירת הגרף לקובץ
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Lilach/Lilach_Data_boxplot.png",
+  plot = boxplot_delta,
+  width = 10,
+  height = 10
+)
+
+# הצגת הגרף
+boxplot_delta
+
+
+boxplot_OFR <- ggplot(Lilach_Data_summary, aes(x = as.factor(Temp), y = OFR, fill = strat_end, color = strat_end)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.75)) +  # קופסאות מסודרות לפי strat_end
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +  # נקודות נשארות בתוך הקופסה
+  scale_fill_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לקופסאות
+  scale_color_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לנקודות
+   labs(x = "", y = expression(OFR~(L~hr^{-1})), fill = "", color = "") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(hjust = 1, size = 10)
+  )
+
+
+# שמירת הגרף לקובץ
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Lilach/Lilach_OFR_boxplot.png",
+  plot = boxplot_OFR,
+  width = 10,
+  height = 10
+)
+
+boxplot_OFR
+
+
+boxplot_Respiration <- ggplot(Lilach_Data_summary, aes(x = as.factor(Temp), y = respiration, fill = strat_end, color = strat_end)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.75)) +  # קופסאות מסודרות לפי strat_end
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +  # נקודות נשארות בתוך הקופסה
+  scale_fill_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לקופסאות
+  scale_color_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לנקודות
+   labs(x = "",y = expression(Respiration~(mu*mol~hr^-1~gr[sponge]^-1)), fill = "", color = "") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(hjust = 1, size = 10)
+  )
+
+
+# שמירת הגרף לקובץ
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Lilach/Lilach_Respiration_boxplot.png",
+  plot = boxplot_Respiration,
+  width = 10,
+  height = 10
+)
+
+
+
+boxplot_Respiration 
+
+
+boxplot_VolRespiration <- ggplot(Lilach_Data_summary, aes(x = as.factor(Temp), y = Respiration, fill = strat_end, color = strat_end)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.75)) +  # קופסאות מסודרות לפי strat_end
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +  # נקודות נשארות בתוך הקופסה
+  scale_fill_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לקופסאות
+  scale_color_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לנקודות
+   labs(x = "",y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)), fill = "", color = "") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(hjust = 1, size = 10)
+  )
+
+
+# שמירת הגרף לקובץ
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Lilach/Lilach_VolRespiration_boxplot.png",
+  plot = boxplot_VolRespiration,
+  width = 10,
+  height = 10
+)
+
+boxplot_VolRespiration
+```
+
+```{r, fig.width=20,fig.height=10}
+
+#Underwater_summary_data<-write.csv(Underwater_summary_data,"Underwater_summary_data.csv")
+# יצירת הקובץ עם העמודות הרלוונטיות ושינוי שם העמודה
+Underwater_summary_data_new <- Underwater_summary_data %>%
+  select(Species, Sponge_num, Species_Sponge, mean_temp,mean_delta,mean_OFR_L_hr, respiration_umol_hr_ml) %>%
+  rename(temp = mean_temp, Delta = mean_delta, OFR = mean_OFR_L_hr )
+
+# הוספת עמודה חדשה בשם "Location" עם הערך "Underwater"
+Underwater_summary_data_new <- Underwater_summary_data_new %>%
+  mutate(Location = "Direct_Underwater")
+
+
+# טעינת הקובץ בפורמט RDS
+respiration_results_22_new <- readRDS("respiration_results_22_new.rds")
+
+
+
+# הוספת עמודה חדשה בשם "Location" עם הערך "laboratory"
+respiration_results_22_new <- respiration_results_22_new %>%
+  mutate(Location = "Respirometr")
+
+
+# איחוד שני הקבצים תוך שמירה על כל הערכים
+combined_data <- full_join(
+  Underwater_summary_data_new,
+  respiration_results_22_new,
+  by = c("Location","Species", "Sponge_num", "Species_Sponge", "temp", "respiration_umol_hr_ml")
+)
+
+
+
+
+# יצירת איור קופסאות עם ציר Y לוגריתמי ותצוגה רגילה
+respiration_boxplot <- ggplot(combined_data, aes(x = Location, y = respiration_umol_hr_ml,
+                                                 fill = Species)) +
+  geom_boxplot(aes(fill = Species), 
+               outlier.shape = NA, position = position_dodge(width = 0.75)) +  # ביטול נקודות חריגות
+  geom_point(aes(color = Species, fill = Species), 
+             position = position_dodge(width = 0.75), size = 3, alpha = 0.8, shape = 21, stroke = 0.7) + 
+  
+  labs(
+    x = "", 
+    y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+    fill = "",
+    color = ""
+  ) +
+  scale_y_log10(limits = c(0.01, 100), 
+                labels = label_number(accuracy = 0.01)) +  # ציר Y לוגריתמי עם מספרים רגילים
+  scale_fill_manual(values = c("#097d9c", "#ea6f16")) +  # צבעים מותאמים אישית
+  scale_color_manual(values = c("black", "black")) +      # מסגרת שחורה לנקודות
+  facet_wrap(~Species, scales = "free_y", ncol = 2) +    # חלוקה לפי Species
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "none",  # הסתרת מקרא
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        strip.text = element_text(size = 15, face = "italic"))
+
+
+# שמירה כקובץ PNG
+ggsave("respiration_boxplot.png", plot = respiration_boxplot, width = 13, height = 10, dpi = 300)
+
+
+# הצגת הגרף
+respiration_boxplot
+
+
+
+
+```
+
+```{r, fig.width=20,fig.height=10}
+# חישוב הסטטיסטיקות לפי Species
+summary_stats <- combined_data %>%
+  group_by(Species,Location) %>%
+  summarise(
+    mean_respiration = mean(respiration_umol_hr_ml, na.rm = TRUE),  # ממוצע
+    median_respiration = median(respiration_umol_hr_ml, na.rm = TRUE),  # חציון
+    std_dev = sd(respiration_umol_hr_ml, na.rm = TRUE),  # סטיית תקן
+    count = n(),  # מספר המדידות
+    se_respiration = std_dev / sqrt(count),  # שגיאה תקנית
+    ci = qt(0.975, df = count-1) * se_respiration,  # רווח בר סמך 
+    
+    CV = (std_dev / mean_respiration) * 100  # מקדם השונות (Coefficient of Variation)
+  )
+
+```
+
+
+
+
+
+
+```{r, fig.width=10,fig.height=10}
+
+
+
+Lilach_summary <- Lilach_Data_summary %>%
+  filter(Temp == 24, strat_end == "end") %>%  # סינון לטמפ' 24° ול-strat_end "end"
+  mutate(
+    Species = "D.erythraeanus",  
+    Sponge_num = as.character(Sponge),  # המרה ל-character
+    Species_Sponge = paste(Species, Sponge_num, sep = "_"),
+    temp = Temp,  
+    respiration_umol_hr_ml = Respiration,  
+    Location = "Direct_Red_Sea_Simulator"  
+  ) %>%
+  select(Species, Sponge_num, Species_Sponge, temp,Delta,OFR, respiration_umol_hr_ml, Location)
+
+
+# המרת Sponge_num גם ב-combined_data כדי להבטיח סוג נתונים זהה
+combined_data <- combined_data %>%
+  mutate(Sponge_num = as.character(Sponge_num))
+
+# איחוד הנתונים לאחר שהעמודות מתואמות
+merged_data <- bind_rows(Lilach_summary, combined_data)
+
+
+# חישוב ממוצעים לכל קבוצה
+mean_values <- merged_data %>%
+  group_by(Species, Location) %>%
+  summarise(mean_resp = mean(respiration_umol_hr_ml, na.rm = TRUE), .groups = "drop")
+
+# יצירת איור קופסאות עם ציר Y לוגריתמי ותצוגה רגילה
+All_respiration_boxplot <- ggplot(merged_data, aes(x = Location, y = respiration_umol_hr_ml,
+                                                   fill = Species)) +
+  geom_boxplot(aes(fill = Species, alpha = 0.5), 
+               outlier.shape = NA, position = position_dodge(width = 0.75)) +  # ביטול נקודות חריגות
+  geom_point(aes(color = Species, fill = Species), 
+             position = position_dodge(width = 0.75), size = 3, alpha = 0.8, shape = 21, stroke = 0.7) + 
+  stat_summary(fun = mean, geom = "point", aes(x = Location, y = respiration_umol_hr_ml),
+               shape = 4, size = 5, stroke = 1.5, color = "black", position = position_dodge(width = 0.75)) +  # הוספת X של ממוצע
+  
+  labs(
+    x = "", 
+    y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+    fill = "",
+    color = ""
+  ) +
+#  scale_y_log10(limits = c(0.01, 100), 
+ #               labels = label_number(accuracy = 0.01)) +  # ציר Y לוגריתמי עם מספרים רגילים
+  scale_fill_manual(values = c("#097d9c", "#ea6f16")) +  # צבעים מותאמים אישית
+  scale_color_manual(values = c("#097d9c", "#ea6f16")) +      # מסגרת שחורה לנקודות
+  facet_wrap(~Species, scales = "free_y", ncol = 2, drop = TRUE) +  # מציג רק קטגוריות עם נתונים
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "none",  # הסתרת מקרא
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+
+# שמירה כקובץ PNG
+ggsave("All_respiration_boxplot.png", plot = All_respiration_boxplot, width = 13, height = 10, dpi = 300)
+
+# הצגת הגרף
+All_respiration_boxplot
+
+
+
+# יצירת איור קופסאות עם ציר Y לוגריתמי ותצוגה רגילה
+All_Delta_boxplot <- ggplot(merged_data, aes(x = Location, y = Delta,
+                                                   fill = Species)) +
+  geom_boxplot(aes(fill = Species, alpha = 0.5), 
+               outlier.shape = NA, position = position_dodge(width = 0.75)) +  # ביטול נקודות חריגות
+  geom_point(aes(color = Species, fill = Species), 
+             position = position_dodge(width = 0.75), size = 3, alpha = 0.8, shape = 21, stroke = 0.7) + 
+   labs(
+    x = "", 
+   y = expression(Delta*O[2] ~(mu*mol~L[p]^-1)),
+    fill = "",
+    color = ""
+  ) +
+ # scale_y_log10(limits = c(0.01, 100), 
+  #              labels = label_number(accuracy = 0.01)) +  # ציר Y לוגריתמי עם מספרים רגילים
+  scale_fill_manual(values = c("#097d9c", "#ea6f16")) +  # צבעים מותאמים אישית
+  scale_color_manual(values = c("#097d9c", "#ea6f16")) +      # מסגרת שחורה לנקודות
+  facet_wrap(~Species, scales = "free_y", ncol = 2, drop = TRUE) +  # מציג רק קטגוריות עם נתונים
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "none",  # הסתרת מקרא
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+
+All_Delta_boxplot 
+
+
+# שמירה כקובץ PNG
+ggsave("All_Delta_boxplot.png", plot = All_Delta_boxplot, width = 13, height = 10, dpi = 300)
+
+
+# יצירת איור קופסאות עם ציר Y לוגריתמי ותצוגה רגילה
+All_OFR_boxplot <- ggplot(merged_data, aes(x = Location, y = OFR,
+                                                   fill = Species)) +
+  geom_boxplot(aes(fill = Species, alpha = 0.5), 
+               outlier.shape = NA, position = position_dodge(width = 0.75)) +  # ביטול נקודות חריגות
+  geom_point(aes(color = Species, fill = Species), 
+             position = position_dodge(width = 0.75), size = 3, alpha = 0.8, shape = 21, stroke = 0.7) + 
+   labs(
+    x = "", 
+   y = expression(Osculom~Flow~Rate~(L~hr^{-1})),
+    fill = "",
+    color = ""
+  ) +
+ # scale_y_log10(limits = c(0.01, 100), 
+  #              labels = label_number(accuracy = 0.01)) +  # ציר Y לוגריתמי עם מספרים רגילים
+  scale_fill_manual(values = c("#097d9c", "#ea6f16")) +  # צבעים מותאמים אישית
+  scale_color_manual(values = c("#097d9c", "#ea6f16")) +      # מסגרת שחורה לנקודות
+  facet_wrap(~Species, scales = "free_y", ncol = 2, drop = TRUE) +  # מציג רק קטגוריות עם נתונים
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "none",  # הסתרת מקרא
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+
+All_OFR_boxplot 
+
+
+# שמירה כקובץ PNG
+ggsave("All_OFR_boxplot.png", plot = All_OFR_boxplot, width = 13, height = 10, dpi = 300)
+
+#
+# יצירת איור קופסאות עם ציר Y לוגריתמי ותצוגה רגילה
+
+
+```
+
+
+```{r, fig.width=10,fig.height=10}
+# חישוב ממוצע ורווח בר סמך
+summary_data <- merged_data %>%
+  group_by(Species, Location) %>%
+  summarise(
+    mean_respiration = mean(respiration_umol_hr_ml, na.rm = TRUE),
+    sd_respiration = sd(respiration_umol_hr_ml, na.rm = TRUE),
+    n = n(),
+    se_respiration = sd_respiration / sqrt(n),  # שגיאה תקנית
+    ci_lower = mean_respiration - qt(0.95, df = n-1) * se_respiration,  # רווח בר סמך תחתון
+    ci_upper = mean_respiration + qt(0.95, df = n-1) * se_respiration,  # רווח בר סמך עליון
+    ci =  qt(0.95, df = n-1) * se_respiration,  # רווח בר סמך עליון
+    .groups = "drop"
+  )
+
+# צבעים מותאמים אישית
+custom_colors <- c("D.erythraeanus" = "#ea6f16", "C.siphonella" = "#097d9c")
+
+# יצירת גרף עם עמודות ורווח בר סמך
+mean_CI_plot <- ggplot(summary_data, aes(x = Location, y = mean_respiration, fill = Species)) +
+  geom_col(position = position_dodge(width = 0.75), alpha = 0.8) +  # עמודות עם שקיפות קלה
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                width = 0.3, size = 1, position = position_dodge(width = 0.75)) +  # רווח בר סמך
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) +  # קו הדגשה ב-0
+  scale_fill_manual(values = custom_colors) +  # צבעים מותאמים אישית
+  facet_wrap(~Species, ncol = 2, drop = TRUE) +  # פיצול לפי מין
+  labs(
+    x = "", 
+    y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+    fill = "Species"
+  ) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "none",  # הסתרת מקרא
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+
+# שמירת הגרף
+ggsave("Mean_Respiration_CI_Plot.png", plot = mean_CI_plot, width = 13, height = 10, dpi = 300)
+
+# הצגת הגרף
+mean_CI_plot
+
+# צבעים מותאמים אישית
+custom_colors <- c("D.erythraeanus" = "#ea6f16", "C.siphonella" = "#097d9c")
+
+# יצירת גרף עם עמודות ורווח בר סמך
+mean_CI_plot <- ggplot(summary_data, aes(x = Location, y = mean_respiration, fill = Species)) +
+  geom_col(position = position_dodge(width = 0.75), alpha = 0.8) +  # עמודות עם שקיפות קלה
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                width = 0.3, size = 1, position = position_dodge(width = 0.75)) +  # רווח בר סמך
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) +  # קו הדגשה ב-0
+  geom_text(aes(label = paste("n =", n), y = ci_upper + 0.2),  
+            position = position_dodge(width = 0.75), size = 5, vjust = 0) +  # הצגת מספר החזרות מעל כל עמודה
+  scale_fill_manual(values = custom_colors) +  # צבעים מותאמים אישית
+  coord_cartesian(ylim = c(-1, 8)) +  # הגבלת ציר Y
+  facet_wrap(~Species, ncol = 2, drop = TRUE) +  # פיצול לפי מין
+  labs(
+    x = "", 
+    y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+    fill = "Species"
+  ) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "none",  # הסתרת מקרא
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+
+# שמירת הגרף
+ggsave("Mean_Respiration_CI_Plot.png", plot = mean_CI_plot, width = 13, height = 10, dpi = 300)
+
+# הצגת הגרף
+mean_CI_plot
+
+
+
+```
+```{r, fig.width=10,fig.height=10}
+
+
+# סינון החוצה את Direct_Red_Sea_Simulator
+summary_data <- merged_data %>%
+  filter(Location != "Direct_Red_Sea_Simulator") %>%   # 👈 מסנן את המיקום הלא רצוי
+  group_by(Species, Location) %>%
+  summarise(
+    mean_respiration = mean(respiration_umol_hr_ml, na.rm = TRUE),
+    sd_respiration = sd(respiration_umol_hr_ml, na.rm = TRUE),
+    n = n(),
+    se_respiration = sd_respiration / sqrt(n),
+    ci_lower = mean_respiration - qt(0.95, df = n-1) * se_respiration,
+    ci_upper = mean_respiration + qt(0.95, df = n-1) * se_respiration,
+    ci =  qt(0.95, df = n-1) * se_respiration,
+    .groups = "drop"
+  )
+
+# יצירת הגרף כמו קודם
+custom_colors <- c("D.erythraeanus" = "#ea6f16", "C.siphonella" = "#097d9c")
+
+# יצירת הגרף כמו קודם עם השינויים
+mean_CI_plot <- ggplot(summary_data, aes(x = Location, y = mean_respiration, fill = Species)) +
+  geom_col(position = position_dodge(width = 0.75), alpha = 0.8) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper),
+                width = 0.3, size = 1, position = position_dodge(width = 0.75)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) +
+  geom_text(aes(label = paste("n =", n), y = ci_upper + 0.2),
+            position = position_dodge(width = 0.75), size = 5, vjust = 0) +
+  scale_fill_manual(values = custom_colors) +
+  # שינוי שמות לקטגוריות בציר X
+  scale_x_discrete(labels = c(
+    "Direct_Underwater" = "Direct underwater",
+    "Respirometr" = "Metabolic chambers"
+  )) +
+  facet_wrap(~Species, ncol = 2, drop = TRUE, scales = "free_y") +  # 👈 ציר Y חופשי
+  labs(
+    x = "",
+    y = expression(Specific~respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+    fill = "Species"
+  ) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.position = "none",
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 12, color = "black"),  # 👈 שחור לציר X
+    strip.text = element_text(size = 15, face = "italic")
+  )
+
+ggsave("Mean_Respiration_CI_Plot.png", plot = mean_CI_plot, width = 8, height = 8, dpi = 300)
+mean_CI_plot
+
+
+```
+
+```{r, fig.width=10,fig.height=10}
+library(lme4)
+library(lmerTest)
+
+model <- lmer(respiration_umol_hr_ml ~ Location + (1|Sponge_num), data = merged_data)
+summary(model)
+
+library(dplyr)
+
+# פילוח לפי מין
+c_siphonella <- merged_data %>% filter(Species == "C.siphonella")
+d_erythraeanus <- merged_data %>% filter(Species == "D.erythraeanus")
+
+# Wilcoxon test לכל מין
+wilcox.test(respiration_umol_hr_ml ~ Location, data = c_siphonella)
+
+
+# סינון החוצה את Direct_Red_Sea_Simulator
+d_erythraeanus_clean <- d_erythraeanus %>%
+  filter(Location != "Direct_Red_Sea_Simulator")
+
+# בדיקה כמה רמות נשארו
+table(d_erythraeanus_clean$Location)
+
+# עכשיו מבחן Wilcoxon
+wilcox.test(respiration_umol_hr_ml ~ Location, data = d_erythraeanus_clean)
+
+
+
+```
+
+```{r, fig.width=10,fig.height=10}
+
+# סינון נתונים ל-D. erythraeanus בלבד
+data_D_erythraeanus <- summary_data %>%
+  filter(Species == "D.erythraeanus")
+
+# סינון נתונים ל-C. siphonella בלבד (בלי Direct_Red_Sea_Simulator)
+data_C_siphonella <- summary_data %>%
+  filter(Species == "C.siphonella")
+
+# 🔹 גרף ל-D. erythraeanus
+plot_D_erythraeanus <- ggplot(data_D_erythraeanus, aes(x = Location, y = mean_respiration, fill = Species)) +
+  geom_col(position = position_dodge(width = 0.75), alpha = 0.8) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                width = 0.3, size = 1, position = position_dodge(width = 0.75)) +
+  geom_text(aes(label = paste0("n = ", n), y = ci_upper + 0.4),
+            position = position_dodge(width = 0.75), size = 5) +  # הוספת הטקסט של n
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) +  
+  scale_fill_manual(values = c("D.erythraeanus" = "#ea6f16")) +  
+  coord_cartesian(ylim = c(-1, 8)) +
+  labs(
+    x = "", 
+    y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+    fill = "",
+    title = expression(italic("D. erythraeanus"))
+  ) +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.position = "none",
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    axis.title.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 15),
+   axis.text.x = element_text(size = 15,angle = 20,margin = margin(t = 30)),
+    strip.text = element_text(size = 15, face = "italic")
+  )
+
+
+# 🔹 גרף ל-C. siphonella (ללא Direct_Red_Sea_Simulator)
+plot_C_siphonella <- ggplot(data_C_siphonella, aes(x = Location, y = mean_respiration, fill = Species)) +
+  geom_col(position = position_dodge(width = 0.75), alpha = 0.8) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                width = 0.3, size = 1, position = position_dodge(width = 0.75)) +
+  geom_text(aes(label = paste0("n = ", n), y = ci_upper + 0.4),
+            position = position_dodge(width = 0.75), size = 5) +  # הוספת הטקסט של n
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) +  
+  scale_fill_manual(values = c("C.siphonella" = "#097d9c")) +  
+  coord_cartesian(ylim = c(-1, 8)) +
+  labs(
+    x = "", 
+    y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+    fill = "",
+    title = expression(italic("C. siphonella"))
+  ) +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.position = "none",
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15,angle = 20,margin = margin(t = 30)),
+       strip.text = element_text(size = 15, face = "italic")
+  )
+
+# 🔹 איחוד שני הגרפים בעזרת patchwork
+combined_plot <- plot_C_siphonella + plot_D_erythraeanus + plot_layout(ncol = 2)
+
+# 🔹 שמירת הגרף המאוחד
+ggsave("Mean_Respiration_CI_Plot_Combined.png", plot = combined_plot, width = 14, height = 7, dpi = 300)
+
+# 🔹 הצגת הגרף
+combined_plot
+
+```
+
+
+
+```{r, fig.width=10,fig.height=10}
+
+file_path <- "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Updated_Sponge_Respiration.xlsx"
+
+# קריאת גיליון בשם "Sheet1" (שני את השם לפי הצורך)
+literature_data <- read_excel(file_path, sheet = "Updated_Sponge_Respiration")
+
+
+literature_data <- literature_data %>%
+  rename(Temperature_C = `Temperature (ֲ°C)`)  # שינוי שם העמודה לשם פשוט יותר
+
+
+```
+
+
+```{r, fig.width=10,fig.height=10}
+
+
+# 1️⃣ ניקוי הנתונים - מחיקת ערכים חסרים
+cleaned_literature_data <- literature_data %>%
+  filter(!is.na(`μmol h-1 mLsponge-1`))
+
+# 2️⃣ חישוב n וערך y לפי Location ו-Measurement Method
+n_data_location <- cleaned_literature_data %>%
+  group_by(Location, `Measurement Method`) %>%
+  summarise(
+    n = n(),
+    y = max(`μmol h-1 mLsponge-1`, na.rm = TRUE) + 0.5,
+    .groups = "drop"
+  )
+
+# 3️⃣ גרף קופסאות לפי Location
+boxplot_literature <- ggplot(cleaned_literature_data, aes(x = Location, 
+                                                           y = `μmol h-1 mLsponge-1`, 
+                                                           fill = `Measurement Method`)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(0.75)) +  
+  geom_jitter(aes(color = `Measurement Method`), 
+              position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +
+  geom_text(data = n_data_location, 
+            aes(x = Location, y = y, label = paste0("n=", n), group = `Measurement Method`),
+            position = position_dodge(0.75), size = 4, inherit.aes = FALSE) +
+  scale_fill_brewer(palette = "Dark2") +  
+  scale_color_brewer(palette = "Dark2") +
+  coord_cartesian(ylim = c(0, 16)) +
+  labs(x = "", 
+       y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+       fill = "", color = "") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+
+# 4️⃣ שמירת הגרף הראשון
+ggsave("Literature_Boxplot.png", plot = boxplot_literature, width = 10, height = 7, dpi = 300)
+
+
+# 5️⃣ הוספת עמודת Temperature_Range בטווחים של 2 מעלות
+cleaned_literature_data <- cleaned_literature_data %>%
+  mutate(Temperature_Range = cut(Temperature_C, 
+                                 breaks = seq(floor(min(Temperature_C, na.rm = TRUE)), 
+                                              ceiling(max(Temperature_C, na.rm = TRUE)), 
+                                              by = 2), 
+                                 include.lowest = TRUE))
+
+# 6️⃣ חישוב n ו-y לטווחי טמפרטורה
+n_data_temp <- cleaned_literature_data %>%
+  group_by(Temperature_Range, `Measurement Method`) %>%
+  summarise(
+    n = n(),
+    y = max(`μmol h-1 mLsponge-1`, na.rm = TRUE) + 0.5,
+    .groups = "drop"
+  )
+
+# 7️⃣ גרף קופסאות לפי טווח טמפרטורה
+boxplot_temp_binned <- ggplot(cleaned_literature_data, aes(x = Temperature_Range, 
+                                                            y = `μmol h-1 mLsponge-1`, 
+                                                            fill = `Measurement Method`)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(0.75)) +  
+  geom_jitter(aes(color = `Measurement Method`), 
+              position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +
+  geom_text(data = n_data_temp, 
+            aes(x = Temperature_Range, y = y, label = paste0("n=", n), group = `Measurement Method`),
+            position = position_dodge(0.75), size = 4, inherit.aes = FALSE) +
+  scale_fill_brewer(palette = "Dark2") +  
+  scale_color_brewer(palette = "Dark2") +
+  coord_cartesian(ylim = c(0, 16)) +
+  labs(x = "Temperature Range (°C)", 
+       y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)),
+       fill = "", color = "") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 10),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        strip.text = element_text(size = 12, face = "italic"))
+
+# 8️⃣ שמירת הגרף השני
+ggsave("Temperature_vs_Consumption_Boxplot.png", plot = boxplot_temp_binned, width = 10, height = 7, dpi = 300)
+
+# 9️⃣ הצגת הגרפים
+boxplot_literature
+boxplot_temp_binned
+
+
+```
+
+
+
+```{r, fig.width=10,fig.height=10}
+
+
+# 1️⃣ ניקוי נתונים - הסרת ערכים חסרים
+cleaned_data <- literature_data %>%
+  filter(!is.na(`μmol h-1 mLsponge-1`))  # שמירת שורות ללא NA
+
+# 2️⃣ המרת המשתנים לקטגוריים
+cleaned_data <- cleaned_data %>%
+  mutate(Location = as.factor(Location),
+         `Measurement Method` = as.factor(`Measurement Method`))
+
+# 3️⃣ ביצוע ניתוח שונות דו-כיווני ANOVA
+anova_model <- aov(`μmol h-1 mLsponge-1` ~ Location * `Measurement Method`, data = cleaned_data)
+
+# 4️⃣ הצגת תוצאות ANOVA
+summary(anova_model)
+
+# 5️⃣ בדיקת הנחות ANOVA
+# בדיקת נורמליות באמצעות מבחן שפרו-וילק (Shapiro-Wilk test)
+shapiro.test(residuals(anova_model))  
+
+# בדיקת הומוגניות שונויות באמצעות מבחן Levene
+leveneTest(`μmol h-1 mLsponge-1` ~ Location * `Measurement Method`, data = cleaned_data)
+
+TukeyHSD(anova_model, "Location")
+
+```
+
+
+
+```{r, fig.width=10,fig.height=10}
+
+Diacarnus_erythraenus_old<-read.csv("C:/Users/ASUS/Google Drive/Sponge/Data Analysis/old/Diacarnus_erythraenus_old.csv")
+
+Diacarnus_erythraenus_old<- Diacarnus_erythraenus_old %>%
+      mutate(Date = as.Date(date_yyyy.MM.dd, format = "%Y/%m/%d"),
+             Time = hms::as_hms(time_HH.mm.ss),
+             DateTime = as.POSIXct(Date_and_Time))
+
+# יצירת עמודת DateTime מחדש בצורה תקינה
+Diacarnus_erythraenus_old <- Diacarnus_erythraenus_old %>%
+  mutate(
+    DateTime = as.POSIXct(paste(date_yyyy.MM.dd, time_HH.mm.ss), format="%d/%m/%Y %H:%M:%S", tz="UTC")
+  )
+
+# בדיקה שהתאריכים נראים תקינים
+summary(Diacarnus_erythraenus_old$DateTime)
+
+
+# יצירת הגרף
+ggplot(Diacarnus_erythraenus_old, aes(x = DateTime)) +
+  geom_point(aes(y = AMB, color = "AMB"), size = 1) +
+  geom_point(aes(y = Ex_21, color = "Ex_21"), size = 1) +
+  labs(x = "DateTime", y = "Oxygen Concentration (µmol/L)", color = "Legend") +
+  theme_minimal()
+
+
+
+# הגדרת פרמטרים
+num_series <- 25
+window_length <- 10 * 60  # 10 דקות (בשניות)
+
+# בחירת נקודות התחלה אקראיות
+set.seed(42)  # כדי שהתוצאות יהיו שחזרות
+start_times <- sample(Diacarnus_erythraenus_old$DateTime, num_series)
+
+# יצירת רשימה של 25 סדרות זמן
+time_series_list <- lapply(start_times, function(start_time) {
+  Diacarnus_erythraenus_old %>%
+    filter(DateTime >= start_time & DateTime < (start_time + window_length))
+})
+
+# חיבור כל הסדרות לקובץ אחד עם מזהה סדרה
+combined_series <- bind_rows(time_series_list, .id = "Series_ID")
+
+# ציור הגרף עם צבעים לכל סדרת זמן
+Diacarnus_erythraenus_plot<- ggplot(combined_series, aes(x = DateTime)) +
+   geom_point(aes(y = AMB, color = "AMB"), size = 1) +
+  geom_point(aes(y = Ex_21, color = "Ex_21"), size = 1) +
+   facet_wrap(~ Series_ID, scales = "free") +
+  labs(x = "Date & Time", y = "Oxygen Concentration (µmol/L)", 
+       title = "",color="") +
+  theme(
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, color = "black"),
+      legend.key = element_rect(fill = "white", color = NA, size = 30),
+      legend.title = element_text(size = 15),
+      legend.text = element_text(size = 10, face = "italic"), 
+      panel.background = element_blank(), 
+      axis.line = element_line(colour = "black"),
+      strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+      strip.text = element_text(size = 5, face = "italic"), # שינוי גודל הכתב של ה-facet
+      axis.title.y = element_text(size = 15),
+      axis.title.x = element_text(size = 15),
+      axis.text.y = element_text(size = 10),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+# שמירה כקובץ PNG
+ggsave("Diacarnus_erythraenus_plot.png", plot = Diacarnus_erythraenus_plot, width = 13, height = 10, dpi = 300)
+
+
+
+Diacarnus_erythraenus_plot
+
+```
+

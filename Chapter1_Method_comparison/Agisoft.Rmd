@@ -1,0 +1,621 @@
+---
+title: "Lilach_respiration"
+author: "Raz"
+date: "2025-03-04"
+output: html_document
+---
+
+#packages
+```{r setup, include=FALSE}
+
+#knitr::opts_knit$set(root.dir)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(data.table)
+library(openxlsx)
+library(ggplot2)
+library(tidyverse)
+library(seacarb)
+library(hms)
+library(scales)
+library(RColorBrewer)
+library(patchwork)
+library(Hmisc)
+library(zoo)
+library(capl)
+library(fuzzyjoin)
+library(openxlsx)
+library(gridExtra)
+library(ggpmisc)
+#Rmarkdown assembly
+library(rmdformats)
+library(rmarkdown)
+library(knitr)
+library(formattable)
+library(kableExtra)
+library(tinytex) #if this installation does not work, read section below in RStudio 
+library(googlesheets4)
+library(colourpicker)
+
+
+```
+
+
+```{r, fig.width=10,fig.height=10}
+
+Lilach_Data<- read.csv("C:/Users/ASUS/Google Drive/Sponge/Data Analysis/Lilach/oxigen/respiration/Lilach_respiration.csv")
+
+
+Lilach_Data<-Lilach_Data %>%
+      mutate(Date = as.Date(Date, format = "%d/%m/%Y"))
+
+# קיבוץ הנתונים וחישוב ממוצע לכל עמודה מספרית
+Lilach_Data_summary <- Lilach_Data %>%
+  group_by(Date, strat_end, habitat, aquria,Treatment, Sponge) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop")
+
+
+
+Lilach_Data_summary <- Lilach_Data_summary %>%
+  mutate(
+    volume = Weight * 20,  # אם העמודה עדיין לא קיימת, נוסיף אותה
+    Respiration = (Delta * OFR) / volume  # חישוב Respiration
+  )
+
+
+
+
+Lilach_Data_summary <- Lilach_Data_summary %>%
+  mutate(Temp = case_when(
+    Treatment == "CONTROL" ~ 24,
+    Treatment == "D2" ~ 26,
+    Treatment == "D6" ~ 30,
+    TRUE ~ NA_real_  # אם יש ערכים אחרים ב-Treatment, הם יקבלו NA
+  ))
+
+
+boxplot_delta <- ggplot(Lilach_Data_summary, aes(x = as.factor(Temp), y = Delta, fill = strat_end, color = strat_end)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.75)) +  # קופסאות מסודרות לפי strat_end
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +  # נקודות נשארות בתוך הקופסה
+  scale_fill_manual(values = c("start" = "#483D8B", "end" =  "#8B0A50")) +  # צבעים לקופסאות
+  scale_color_manual(values = c("start" = "#483D8B", "end" =  "#8B0A50")) +  # צבעים לנקודות
+  labs(x = "", y = expression(Delta*O[2] ~(mu*mol~L[p]^-1)), fill = "", color = "") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(hjust = 1, size = 10)
+  )
+
+# שמירת הגרף לקובץ
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Lilach/Lilach_Data_boxplot.png",
+  plot = boxplot_delta,
+  width = 10,
+  height = 10
+)
+
+# הצגת הגרף
+boxplot_delta
+
+
+boxplot_OFR <- ggplot(Lilach_Data_summary, aes(x = as.factor(Temp), y = OFR, fill = strat_end, color = strat_end)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.75)) +  # קופסאות מסודרות לפי strat_end
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +  # נקודות נשארות בתוך הקופסה
+  scale_fill_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לקופסאות
+  scale_color_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לנקודות
+   labs(x = "", y = expression(OFR~(L~hr^{-1})), fill = "", color = "") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(hjust = 1, size = 10)
+  )
+
+
+# שמירת הגרף לקובץ
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Lilach/Lilach_OFR_boxplot.png",
+  plot = boxplot_OFR,
+  width = 10,
+  height = 10
+)
+
+boxplot_OFR
+
+
+boxplot_Respiration <- ggplot(Lilach_Data_summary, aes(x = as.factor(Temp), y = respiration, fill = strat_end, color = strat_end)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.75)) +  # קופסאות מסודרות לפי strat_end
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +  # נקודות נשארות בתוך הקופסה
+  scale_fill_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לקופסאות
+  scale_color_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לנקודות
+   labs(x = "",y = expression(Respiration~(mu*mol~hr^-1~gr[sponge]^-1)), fill = "", color = "") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(hjust = 1, size = 10)
+  )
+
+
+# שמירת הגרף לקובץ
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Lilach/Lilach_Respiration_boxplot.png",
+  plot = boxplot_Respiration,
+  width = 10,
+  height = 10
+)
+
+
+
+boxplot_Respiration 
+
+
+boxplot_VolRespiration <- ggplot(Lilach_Data_summary, aes(x = as.factor(Temp), y = Respiration, fill = strat_end, color = strat_end)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.75)) +  # קופסאות מסודרות לפי strat_end
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.75), 
+              size = 2, alpha = 0.7) +  # נקודות נשארות בתוך הקופסה
+  scale_fill_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לקופסאות
+  scale_color_manual(values = c("start" = "#483D8B", "end" = "#8B0A50")) +  # צבעים לנקודות
+   labs(x = "",y = expression(Respiration~(mu*mol~hr^-1~ml[sponge]^-1)), fill = "", color = "") +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    panel.background = element_blank(), 
+    axis.line = element_line(colour = "black"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    axis.title.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.text.x = element_text(hjust = 1, size = 10)
+  )
+
+
+# שמירת הגרף לקובץ
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Lilach/Lilach_VolRespiration_boxplot.png",
+  plot = boxplot_VolRespiration,
+  width = 10,
+  height = 10
+)
+
+boxplot_VolRespiration
+```
+
+
+
+```{r, fig.width=10,fig.height=10}
+# קריאה ישירה מהקובץ
+gs_url <- "https://docs.google.com/spreadsheets/d/164Dash5TdocrxAnGAPAIEubC47uzU2vTi7gSytMWDjE/edit?gid=500767374"
+
+# טעינת הנתונים מהלשונית "Agisoft_volume"
+Agisoft_volume <- read_sheet(gs_url, sheet = "Agisoft_volume")
+
+
+
+# סינון נתונים - מחיקת שורות עם NA בעמודות Agisoft_ml ו- Geometric_shapes_ml
+cleaned_data <- Agisoft_volume %>%
+  filter(!is.na(Agisoft_ml) & !is.na(Geometric_shapes_ml))
+
+# הגדרת צבעים מותאמים אישית בשם ייחודי
+volume_colors <- c("C.siphonella" = "#097d9c", "D.erythraeanus" = "#ea6f16")
+
+# יצירת Scatter plot עם צבעים מותאמים אישית
+volume_plot <- ggplot(cleaned_data, aes(x = Geometric_shapes_ml, y = Agisoft_ml, color = Species)) +
+  geom_point(size = 3, alpha = 0.7) +  # נקודות שקופות מעט
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", size = 1) +  # קו מגמה (רגרסיה ליניארית)
+  scale_color_manual(values = volume_colors) +  # שימוש בצבעים מותאמים אישית
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               formula = y ~ x, parse = TRUE, label.x.npc = "right", label.y.npc = 0.15, size = 5) +  # הצגת משוואה ו-R²
+  labs(
+    x = "Geometric Shapes Volume (ml)",
+    y = "Agisoft Model Volume (ml)" ) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "none",  # הסתרת מקרא
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+# שמירת האיור כקובץ
+ggsave("Agisoft_vs_Geometric_Volume_with_R2.png", plot = volume_plot, width = 10, height = 7, dpi = 300)
+
+
+# הצגת הגרף
+volume_plot
+
+
+
+# סינון נתונים - רק עבור Species = "Heart" ורק ערכים תקפים ב- Agisoft_m3
+filtered_data <- Agisoft_volume %>%
+  filter(Species == "Heart" & !is.na(Agisoft_m3))
+
+# יצירת גרף עמודות (Bar Plot) להשוואה בין Agisoft_m3 ל- Cylinder_Volume_ml
+cylinder_vs_agisoft_plot <- ggplot(filtered_data, aes(x = Sponge_num, y = Agisoft_ml, fill = Species)) +
+  geom_col(width = 0.5, alpha = 0.8) +  # עמודות עם שקיפות עדינה
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", size = 1) +  # קו אופקי עבור Cylinder_Volume_ml = 1
+  scale_fill_manual(values = "#ea6f16") +  # צבע מותאם אישית ל-Heart
+  labs(
+    x = "Sponge Number",
+    y = "Agisoft Volume (m³)",
+    title = ""
+  ) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "none",  # הסתרת מקרא
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+
+# שמירת האיור
+ggsave("Cylinder_vs_Agisoft_Heart.png", plot = cylinder_vs_agisoft_plot, width = 10, height = 7, dpi = 300)
+
+# הצגת האיור
+cylinder_vs_agisoft_plot
+
+```
+
+
+```{r, fig.width=10,fig.height=10}
+
+# קריאה ישירה מהקובץ
+gs_url <- "https://docs.google.com/spreadsheets/d/164Dash5TdocrxAnGAPAIEubC47uzU2vTi7gSytMWDjE/edit?gid=500767374"
+
+# טעינת הנתונים מהלשונית "Agisoft_volume"
+AFDW_Data <- read_sheet(gs_url, sheet = "AFDW")
+
+
+# המרת Sponge_num למספרי (numeric) בקובץ Agisoft_volume כדי לוודא תאימות
+Agisoft_volume <- Agisoft_volume %>%
+  mutate(Sponge_num = as.numeric(Sponge_num))
+
+# חיבור הנתונים לפי `Sponge_num` ו- `Species`
+AFDWvolume_data <- left_join(AFDW_Data, Agisoft_volume, by = c("Sponge_num", "Species"))
+
+
+# סינון נתונים - מחיקת שורות עם NA ב-AFDW_gr או Agisoft_ml
+cleaned_data <- AFDWvolume_data %>%
+  filter(!is.na(AFDW_gr) & !is.na(Agisoft_ml))
+
+
+# יצירת Scatter plot עם צבעים מותאמים אישית
+AFDW_vs_Volume_plot <- ggplot(cleaned_data, aes(x = AFDW_gr, y = Agisoft_ml, color = Species)) +
+  geom_point(size = 3, alpha = 0.7) +  # נקודות שקופות מעט
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", size = 1) +  # קו מגמה (רגרסיה ליניארית)
+  scale_color_manual(values = volume_colors) +  # שימוש בצבעים מותאמים אישית
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               formula = y ~ x, parse = TRUE, label.x.npc = "right", label.y.npc = 0.15, size = 5) +  # הצגת משוואה ו-R²
+  labs(
+    x = "Ash-Free Dry Weight (AFDW, g)",
+    y = "Agisoft Model Volume (ml)",
+    color = ""
+  ) +
+ theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "right",  # מקרא מוצג בצד ימין
+        legend.text = element_text(size = 15, face = "italic"),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+
+# שמירת האיור כקובץ
+ggsave("AFDW_vs_Agisoft_Volume.png", plot = AFDW_vs_Volume_plot, width = 10, height = 7, dpi = 300)
+
+AFDW_vs_Volume_plot
+
+
+
+
+# סינון נתונים - מחיקת שורות עם NA ב-AFDW_gr או Geometric_shapes_ml
+cleaned_data <- AFDWvolume_data %>%
+  filter(!is.na(AFDW_gr) & !is.na(Geometric_shapes_ml))
+
+
+# יצירת Scatter plot עם צבעים מותאמים אישית
+AFDW_vs_Geometric_plot <- ggplot(cleaned_data, aes(x = AFDW_gr, y = Geometric_shapes_ml, color = Species)) +
+  geom_point(size = 3, alpha = 0.7) +  # נקודות שקופות מעט
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", size = 1) +  # קו מגמה (רגרסיה ליניארית)
+  scale_color_manual(values = volume_colors) +  # שימוש בצבעים מותאמים אישית
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               formula = y ~ x, parse = TRUE, label.x.npc = "right", label.y.npc = 0.15, size = 5) +  # הצגת משוואה ו-R²
+  labs(
+    x = "Ash-Free Dry Weight (AFDW, g)",
+    y = "Geometric Shapes Volume (ml)",
+    color = ""
+  ) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(fill = NA, color = "black"),
+        legend.position = "right",  # מקרא מוצג בצד ימין
+        legend.text = element_text(size = 15, face = "italic"),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 10),
+        strip.text = element_text(size = 15, face = "italic"))
+
+# שמירת האיור כקובץ
+ggsave("AFDW_vs_Geometric_Shapes_Volume.png", plot = AFDW_vs_Geometric_plot, width = 10, height = 7, dpi = 300)
+
+# הצגת הגרף
+AFDW_vs_Geometric_plot
+
+
+```
+
+
+```{r, fig.width=13,fig.height=11}
+# =========================================================
+# Packages
+# =========================================================
+library(tidyverse)
+library(googlesheets4)
+library(ggpmisc)
+library(cowplot)
+library(magick)
+library(patchwork)
+
+# =========================================================
+# Read data
+# =========================================================
+gs_url <- "https://docs.google.com/spreadsheets/d/164Dash5TdocrxAnGAPAIEubC47uzU2vTi7gSytMWDjE/edit?gid=500767374"
+
+AFDW_Data <- read_sheet(gs_url, sheet = "AFDW")
+
+# make sure Sponge_num is numeric
+Agisoft_volume <- Agisoft_volume %>%
+  mutate(Sponge_num = as.numeric(Sponge_num))
+
+# join tables
+AFDWvolume_data <- left_join(AFDW_Data, Agisoft_volume, by = c("Sponge_num", "Species"))
+
+# =========================================================
+# IMPORTANT:
+# Do NOT recode Species names here
+# Keep them exactly as they are so scale_color_manual will work
+# =========================================================
+
+# =========================================================
+# Colors
+# Make sure the names here match EXACTLY the names in Species
+# =========================================================
+volume_colors <- c(
+  "C.siphonella"   = "#1f9ebc",
+  "D.erythraeanus" = "#e67e22"
+)
+
+# pretty labels only for legend
+species_labels <- c(
+  "C.siphonella"   = "C. siphonella",
+  "D.erythraeanus" = "D. erythraeanus"
+)
+
+# =========================================================
+# Common theme
+# =========================================================
+theme_volume <- theme_classic(base_size = 16) +
+  theme(
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 0.9),
+    axis.line = element_line(color = "black", linewidth = 0.7),
+
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+
+    axis.text.x = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+
+    legend.text = element_text(size = 13, face = "italic"),
+    legend.key.size = unit(1, "lines"),
+
+    plot.margin = margin(12, 12, 12, 12)
+  )
+
+# =========================================================
+# Plot B: AFDW vs Agisoft volume
+# =========================================================
+cleaned_agisoft <- AFDWvolume_data %>%
+  filter(!is.na(AFDW_gr) & !is.na(Agisoft_ml))
+
+plot_B <- ggplot(cleaned_agisoft,
+                 aes(x = AFDW_gr, y = Agisoft_ml, color = Species)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", linewidth = 0.9) +
+  scale_color_manual(
+    values = volume_colors,
+    labels = species_labels
+  ) +
+  stat_poly_eq(
+    aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")),
+    formula = y ~ x,
+    parse = TRUE,
+    label.x.npc = 0.05,
+    label.y.npc = 0.95,
+    size = 4.6
+  ) +
+  labs(
+    x = "Ash-Free Dry Weight (AFDW, g)",
+    y = "Agisoft Model Volume (mL)"
+  ) +
+  theme_volume +
+  theme(
+    legend.position = "none"
+  )
+
+# =========================================================
+# Plot C: AFDW vs Geometric shapes volume
+# =========================================================
+cleaned_geo <- AFDWvolume_data %>%
+  filter(!is.na(AFDW_gr) & !is.na(Geometric_shapes_ml))
+
+plot_C <- ggplot(cleaned_geo,
+                 aes(x = AFDW_gr, y = Geometric_shapes_ml, color = Species)) +
+  geom_point(size = 3, alpha = 0.85) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", linewidth = 0.9) +
+  scale_color_manual(
+    values = volume_colors,
+    labels = species_labels
+  ) +
+  stat_poly_eq(
+    aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")),
+    formula = y ~ x,
+    parse = TRUE,
+    label.x.npc = 0.05,
+    label.y.npc = 0.95,
+    size = 4.6
+  ) +
+  labs(
+    x = "Ash-Free Dry Weight (AFDW, g)",
+    y = "Geometric Shapes Volume (mL)"
+  ) +
+  theme_volume +
+  theme(
+    legend.position = "right",
+    legend.box.margin = margin(0, 0, 0, -5),
+    legend.margin = margin(0, 0, 0, 0)
+  )
+
+# =========================================================
+# Image paths
+# =========================================================
+img_dir <- "C:/Users/ASUS/Google Drive/PHD/Eilat_Dec_2024/Underwater Dataloggers"
+
+img_left_path  <- file.path(img_dir, "PC187996.JPG")
+img_right_path <- file.path(img_dir, "PC198856.JPG")
+
+# =========================================================
+# Read images
+# =========================================================
+img_left  <- image_read(img_left_path)
+img_right <- image_read(img_right_path)
+
+# =========================================================
+# Create image panel A
+# =========================================================
+img_left_plot <- ggdraw() +
+  draw_image(img_left, scale = 1)
+
+img_right_plot <- ggdraw() +
+  draw_image(img_right, scale = 1)
+
+img_row <- plot_grid(
+  img_left_plot,
+  img_right_plot,
+  ncol = 2,
+  align = "h",
+  rel_widths = c(1, 1)
+)
+
+panel_A <- ggdraw() +
+  draw_plot(img_row, x = 0.04, y = 0.02, width = 0.94, height = 0.93) +
+  draw_plot_label(
+    label = "A",
+    x = 0.005, y = 0.98,
+    hjust = 0, vjust = 1,
+    size = 18, fontface = "bold"
+  )
+
+# =========================================================
+# Add panel letters OUTSIDE left for B and C
+# =========================================================
+panel_B <- ggdraw() +
+  draw_plot(plot_B, x = 0.04, y = 0, width = 0.96, height = 1) +
+  draw_plot_label(
+    label = "B",
+    x = 0.005, y = 0.98,
+    hjust = 0, vjust = 1,
+    size = 18, fontface = "bold"
+  )
+
+panel_C <- ggdraw() +
+  draw_plot(plot_C, x = 0.04, y = 0, width = 0.96, height = 1) +
+  draw_plot_label(
+    label = "C",
+    x = 0.005, y = 0.98,
+    hjust = 0, vjust = 1,
+    size = 18, fontface = "bold"
+  )
+
+# =========================================================
+# Bottom row
+# =========================================================
+bottom_row <- plot_grid(
+  panel_B,
+  panel_C,
+  ncol = 2,
+  align = "hv",
+  rel_widths = c(1, 1.35)
+)
+# =========================================================
+# Final figure
+# =========================================================
+final_panel <- plot_grid(
+  panel_A,
+  bottom_row,
+  ncol = 1,
+  rel_heights = c(1.05, 1.4)
+)
+
+# =========================================================
+# Save
+# =========================================================
+ggsave(
+  filename = "Figure_AFDW_combined_ABC_fixed.png",
+  plot = final_panel,
+  width = 13,
+  height = 11,
+  dpi = 600,
+  bg = "white"
+)
+
+# Show
+final_panel
+
+```
