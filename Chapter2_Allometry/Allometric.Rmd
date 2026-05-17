@@ -1,0 +1,5632 @@
+---
+title: "test"
+author: "Raz"
+date: "2025-08-12"
+output: html_document
+---
+
+
+#packages
+```{r setup, include=FALSE}
+
+
+#knitr::opts_knit$set(root.dir)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(readxl)
+library(data.table)
+library(openxlsx)
+library(ggplot2)
+library(tidyverse)
+library(seacarb)
+library(hms)
+library(scales)
+library(RColorBrewer)
+library(patchwork)
+library(Hmisc)
+library(zoo)
+library(capl)
+library(ggpubr)
+library(googlesheets4)
+library(ggpmisc)
+library(MASS)
+library(ggsignif)
+library(cowplot)
+library(dplyr)
+library(grid)
+library(png)
+
+#Rmarkdown assembly
+library(rmdformats)
+library(rmarkdown)
+library(knitr)
+library(formattable)
+library(kableExtra)
+library(factoextra)
+library(tinytex) #if this installation does not work, read section below in RStudio 
+
+```
+
+
+## NW_Mediterranean_row_data
+```{r, fig.width=16,fig.height=10}
+
+
+### ================================
+### שלב 1: קריאת נתוני OFR מהגוגל-שיטס (מתחיל מהשורה השלישית)
+### ================================
+sheet_url <- "https://docs.google.com/spreadsheets/d/1vFp0rbGr9K5niG-0GAgNEMunppRf5tMnMHtRvBUFpis/edit?gid=979247839#gid=979247839"
+OFR_data <- read_sheet(sheet_url, sheet = "Sponge_DataBase", skip = 2)
+
+# סינון 5 טורים ראשונים וטור OFR (L hr-1)
+OFR_data_subset <- OFR_data %>%
+  dplyr::select(1:5, 87)
+
+# ניקוי והמרת ערכים בעמודות עם רשימות/מחרוזות
+OFR_data_subset <- OFR_data_subset %>%
+  mutate(
+    Individual_raw = map_chr(`Ind. code`, ~{
+      val <- .x
+      if (is.null(val)) return(NA_character_)
+      if (inherits(val, "POSIXct")) return(NA_character_)
+      if (is.numeric(val)) return(as.character(val))
+      if (grepl("^[0-9]+$", val)) return(val)
+      return(NA_character_)
+    }),
+    OFR_L_hr_raw = map_chr(`OFR (L hr-1)`, ~{
+      val <- .x
+      if (is.null(val)) return(NA_character_)
+      if (inherits(val, "POSIXct")) return(NA_character_)
+      if (is.numeric(val)) return(as.character(val))
+      if (grepl("^[0-9.]+$", val)) return(val)
+      return(NA_character_)
+    }),
+    Individual = as.integer(Individual_raw),
+    OFR_L_hr   = as.numeric(OFR_L_hr_raw),
+    OFR_ml_min = OFR_L_hr * 1000 / 60
+  ) %>%
+  filter(!is.na(Individual), !is.na(OFR_L_hr)) %>%
+  rename(
+    Unique_Code  = `unique Code`,
+    Species_name = Species,
+    Specie_code  = `species code`,
+    Oscula       = `Oscula code`
+  ) %>%
+  dplyr::select(Unique_Code, Species_name, Specie_code, Individual, Oscula, OFR_L_hr, OFR_ml_min)
+
+# קיצור שמות המין
+# קיצור שמות המין (לכל המינים, לא רק 3!)
+OFR_data_subset <- OFR_data_subset %>%
+  mutate(
+    Species = case_when(
+      Species_name == "Agelas oroides"            ~ "A.oroides",
+      Species_name == "Dysidea avara"             ~ "D.avara",
+      Species_name == "Chondrosia reniformis"     ~ "C.reniformis",
+      Species_name == "Cinachyrella cyathophora"  ~ "C.cyathophora",
+      Species_name == "Callyspongia siphonella"   ~ "C.siphonella",
+      Species_name == "Diacarnus erythraeanus"    ~ "D.erythraeanus",
+      Species_name == "Negombata rowi"            ~ "N.rowi",
+      Species_name == "Siphonochalina clavata"    ~ "S.clavatus",
+      Species_name == "Theonella swinhoei"        ~ "T.swinhoei",
+      Species_name == "Mycale fistulifera"        ~ "M.fistulifera",
+      TRUE ~ as.character(Species_name)   # 👈 חשוב מאוד!
+    )
+  )
+
+### ================================
+### שלב 2: הכנת טבלת DFS/Video (ממוצעים לפי Unique_Code)
+### ================================
+
+
+# לעלות את הקובץ עם נתוני ה DFS 
+sheet_url <- "https://docs.google.com/spreadsheets/d/1rK72OfquTZHDREMRkPjSQPIlY4K_aZH60DN8eVfsNC8/edit?gid=0#gid=0"
+sheet_name <- "Database"
+
+# מושכים את הנתונים ישירות ל-R
+DFS_data <- read_sheet(sheet_url, sheet = sheet_name)
+
+
+# שלב 1: חישוב קצב השאיבה לדקה
+DFS_data <- DFS_data %>%
+  mutate(OFR_ml_min = `OFR (ml s-1)` * 60)
+
+
+DFS_data_NW_Mediterranean <- DFS_data %>%
+  transmute(
+    file_name         = as.character(`File name`),
+    Unique_Code       = as.character(Unique_Code),
+    Species           = as.character(Species),
+    individual_number = as.integer(Individual_number),
+    Oscula            = as.integer(Oscula_number),
+    OFR_ml_min        = as.numeric(OFR_ml_min)
+  )
+
+OFR_NW_Mediterranean_data <- DFS_data_NW_Mediterranean %>%
+  group_by(Unique_Code, Species, individual_number, Oscula) %>%
+  summarise(OFR_ml_min = mean(OFR_ml_min, na.rm = TRUE), .groups = "drop")
+
+### ================================
+### שלב 3: סטנדרטיזציה של שמות וטיפוסי נתונים
+### ================================
+OFR_data_subset <- OFR_data_subset %>%
+  transmute(
+    Unique_Code      = as.character(Unique_Code),
+    Species          = as.character(Species),
+    individual_number= as.integer(Individual),
+    Oscula           = as.integer(Oscula),
+    OFR_ml_min       = as.numeric(OFR_ml_min)
+  )
+
+OFR_NW_Mediterranean_data <- OFR_NW_Mediterranean_data %>%
+  transmute(
+    Unique_Code      = as.character(Unique_Code),
+    Species          = case_when(
+      Species == "10" ~ "A.oroides",
+      Species == "13" ~ "D.avara",
+      Species == "11" ~ "C.reniformis",
+      TRUE ~ as.character(Species)
+    ),
+    individual_number= as.integer(individual_number),
+    Oscula           = as.integer(Oscula),
+    OFR_ml_min       = as.numeric(OFR_ml_min)
+  )
+
+### ================================
+### שלב 4: איחוד טבלאות OFR מכל המקורות, ללא כפילויות
+### ================================
+OFR_NW_Mediterranean <- bind_rows(OFR_data_subset, OFR_NW_Mediterranean_data) %>%
+  distinct(Unique_Code, Species, individual_number, Oscula, .keep_all = TRUE)
+
+### ================================
+### שלב 5: הוספת שטח אוסקולה
+### קודם מהגיליון Oscula size, ואז השלמה מ-Sponge_DataBase
+### ================================
+
+# 5A. נתוני שטח אוסקולה מהגיליון Oscula size
+sheet_url_osc <- "https://docs.google.com/spreadsheets/d/1rK72OfquTZHDREMRkPjSQPIlY4K_aZH60DN8eVfsNC8/edit#gid=1799838751"
+
+Oscula_size_data <- read_sheet(sheet_url_osc, sheet = "Oscula size") %>%
+  dplyr::select(Unique_Code, `OSA (mm^2)`) %>%
+  rename(osculum_area_mm2 = `OSA (mm^2)`) %>%
+  mutate(
+    Unique_Code = as.character(Unique_Code),
+    osculum_area_mm2 = as.numeric(osculum_area_mm2)
+  ) %>%
+  distinct(Unique_Code, .keep_all = TRUE)
+
+# 5B. נתוני שטח אוסקולה מתוך Sponge_DataBase
+sheet_url_db <- "https://docs.google.com/spreadsheets/d/1vFp0rbGr9K5niG-0GAgNEMunppRf5tMnMHtRvBUFpis/edit?gid=979247839#gid=979247839"
+
+Oscula_size_db <- read_sheet(
+  sheet_url_db,
+  sheet = "Sponge_DataBase",
+  skip = 2
+) %>%
+  dplyr::select(`unique Code`, `Oscula size (mm^2)`) %>%
+  rename(
+    Unique_Code = `unique Code`,
+    osculum_area_mm2_db = `Oscula size (mm^2)`
+  ) %>%
+  mutate(
+    Unique_Code = as.character(Unique_Code),
+    osculum_area_mm2_db = purrr::map_chr(
+      osculum_area_mm2_db,
+      ~{
+        if (is.null(.x)) return(NA_character_)
+        if (length(.x) == 0) return(NA_character_)
+        as.character(.x[[1]])
+      }
+    ),
+    osculum_area_mm2_db = stringr::str_extract(osculum_area_mm2_db, "[0-9.]+"),
+    osculum_area_mm2_db = as.numeric(osculum_area_mm2_db)
+  ) %>%
+  distinct(Unique_Code, .keep_all = TRUE)
+
+# 5C. חיבור והשלמה
+OFR_NW_Mediterranean <- OFR_NW_Mediterranean %>%
+  mutate(Unique_Code = as.character(Unique_Code)) %>%
+  left_join(Oscula_size_data, by = "Unique_Code") %>%
+  left_join(Oscula_size_db, by = "Unique_Code") %>%
+  mutate(
+    osculum_area_mm2 = dplyr::coalesce(osculum_area_mm2, osculum_area_mm2_db)
+  ) %>%
+  dplyr::select(-osculum_area_mm2_db)
+
+### ================================
+### שלב 6: חיבור נפח ו-SizeClass לכל פרט
+### ================================
+
+OFR_NW_Mediterranean <- OFR_NW_Mediterranean %>%
+  mutate(individual_number = as.character(individual_number))
+
+# -------------------------------
+# 6A. נפח של Agelas מתוך קובץ ה-Volume הישן
+# -------------------------------
+sheet_url_volume <- "https://docs.google.com/spreadsheets/d/1jkyY8AEgMUnSzQkg06YgHHOnn1tChvpJN5FFe5Hcjhk/edit?gid=670826492#gid=670826492"
+SizeClass_data <- read_sheet(sheet_url_volume, sheet = "Volume")
+
+SizeClass_data <- SizeClass_data %>%
+  mutate(Individual = as.character(Individual))
+
+OFR_NW_Mediterranean <- OFR_NW_Mediterranean %>%
+  left_join(SizeClass_data, by = c("individual_number" = "Individual"))
+
+# -------------------------------
+# 6B. נפחים לכל שאר המינים מתוך Sponge_DataBase
+#     הכותרות מתחילות בשורה 3 ולכן skip = 2
+# -------------------------------
+Species_volume_data <- read_sheet(
+  sheet_url_db,
+  sheet = "Sponge_DataBase",
+  skip = 2
+) %>%
+  dplyr::select(`unique Code`, `Estimated sponge volume (mL)`) %>%
+  rename(
+    Unique_Code = `unique Code`,
+    Volume_from_database_ml = `Estimated sponge volume (mL)`
+  ) %>%
+  mutate(
+    Unique_Code = as.character(Unique_Code),
+
+    # 🔴 הפתרון הקריטי
+    Volume_from_database_ml = purrr::map_chr(
+      Volume_from_database_ml,
+      ~{
+        if (is.null(.x)) return(NA_character_)
+        if (length(.x) == 0) return(NA_character_)
+        as.character(.x[[1]])
+      }
+    ),
+
+    Volume_from_database_ml = as.numeric(Volume_from_database_ml)
+  ) %>%
+  distinct(Unique_Code, .keep_all = TRUE)
+
+# -------------------------------
+# 6C. חיבור הנפח לפי Unique_Code ומילוי רק איפה שחסר
+# -------------------------------
+OFR_NW_Mediterranean <- OFR_NW_Mediterranean %>%
+  mutate(Unique_Code = as.character(Unique_Code)) %>%
+  left_join(Species_volume_data, by = "Unique_Code") %>%
+  mutate(
+    Volume_ml = dplyr::coalesce(Volume_ml, Volume_from_database_ml)
+  ) %>%
+  dplyr::select(-Volume_from_database_ml)
+
+# -------------------------------
+# 6D. אם את עדיין רוצה ש-Size_Class יהיה רק לאגלס
+#     אפשר להשאיר את זה כך, אבל לא למחוק Volume_ml
+# -------------------------------
+OFR_NW_Mediterranean <- OFR_NW_Mediterranean %>%
+  mutate(
+    Size_Class = ifelse(Species != "A.oroides", NA, Size_Class)
+  )
+
+# מגדירים את פונקציית הקטגוריות
+size_class_fun <- function(species, area) {
+  case_when(
+    species == "A.oroides" & !is.na(area) & area < 15 ~ "<15",
+    species == "A.oroides" & !is.na(area) & area >= 15 & area < 30 ~ "15–30",
+    species == "A.oroides" & !is.na(area) & area >= 30 & area < 50 ~ "30–50",
+    species == "A.oroides" & !is.na(area) & area >= 50 ~ ">50",
+    TRUE ~ NA_character_
+  )
+}
+
+# מוסיפים עמודת גודל אוסקולה
+OFR_NW_Mediterranean <- OFR_NW_Mediterranean %>%
+  mutate(Osculum_sizeClass = size_class_fun(Species, osculum_area_mm2))
+
+OFR_NW_Mediterranean <- OFR_NW_Mediterranean %>%
+  mutate(OFR_L_hr = OFR_ml_min * 0.06)
+
+### ================================
+### שלב 7: התאמות טיפוס בנתוני דלתא O2
+### ================================
+
+# לעלות את קובץ הסרות החמצן עם המטה דלתא
+DeltaO2_data<-readRDS("C:/Users/ASUS/Google Drive/PHD/Spain/DatAnalysis/Medes_logger_files/respiration_data_all_species.rds")
+
+#סידור השמות
+DeltaO2_data <- DeltaO2_data %>%
+  rename(
+    Unique_Code = Unique_Code,
+    Species_name = Species_name,  
+    Species = Species,
+    Snapshot_Dailycycle = Snapshot_Dailycycle,
+    Individual = Individual_number,
+    Oscula = Oscula_number,
+    DateTime = rounddatetime,
+    Site = Site,
+    Sampler = sampler,
+    Temp = Temp.Oxy.avg,
+    Depth_m = `Depth _m`,
+    Time_period = day_night,
+    O2_In = `Oxygen umol.L In`,
+    O2_Ex = `Oxygen umol.L Ex`,
+    Delta_O2 = delta_oxygen
+  )
+
+DeltaO2_data <- as_tibble(DeltaO2_data)
+
+DeltaO2_data <- DeltaO2_data %>%
+  mutate(
+    # ודאי שהמזהים הם character
+    Unique_Code        = as.character(Unique_Code),
+    Species_name       = as.character(Species_name),
+    # ממירים את הקוד למין מקוצר, כמו בטבלת OFR
+    Species            = case_when(
+                           Species == "10" ~ "A.oroides",
+                           Species == "13" ~ "D.avara",
+                           Species == "11" ~ "C.reniformis",
+                           TRUE ~ as.character(Species)
+                         ),
+    Snapshot_Dailycycle= as.character(Snapshot_Dailycycle),
+    Individual         = as.character(Individual),
+    Oscula             = as.integer(Oscula),
+    DateTime           = as.POSIXct(DateTime, origin = "1970-01-01"),
+    Site               = as.character(Site),
+    Sampler            = as.character(Sampler),
+    Temp               = as.numeric(Temp),
+    Depth_m            = as.numeric(Depth_m),
+    Time_period        = as.character(Time_period),
+    O2_In              = as.numeric(O2_In),
+    O2_Ex              = as.numeric(O2_Ex),
+    Delta_O2           = as.numeric(Delta_O2)
+  )  %>% rename(
+    O2_In_umol_L    = O2_In,
+    O2_Ex_umol_L    = O2_Ex,
+    Delta_O2_umol_L = Delta_O2
+  )
+
+
+OFR_NW_Mediterranean <- OFR_NW_Mediterranean %>%
+  mutate(
+    Unique_Code = as.character(Unique_Code),
+    individual_number = as.character(individual_number),
+    Species = as.character(Species),
+    Oscula = as.integer(Oscula)
+  )
+
+
+### ================================
+### שלב 8: מיזוג סופי לשורות (row) — שילוב OFR לכל מדידה (לפי פרט/אוסקולה)
+### ================================
+merged_NW_Mediterranean_row_data <- full_join(
+  DeltaO2_data,
+  OFR_NW_Mediterranean,
+  by = c(
+    "Unique_Code" = "Unique_Code",
+    "Individual"  = "individual_number",
+    "Species"     = "Species",
+    "Oscula"      = "Oscula"
+  )
+)
+
+
+
+
+### =========================================
+### הקובץ המוכן להמשך ניתוחים:
+### merged_NW_Mediterranean_row_data
+### =========================================
+
+
+
+```
+
+## NW_Mediterranean_summary 
+```{r, fig.width=16,fig.height=10}
+
+
+safe_ci <- function(sd, n) ifelse(is.na(sd) | is.na(n) | n <= 1, NA_real_, 1.96 * sd / sqrt(n))
+safe_cv <- function(sd, mean) ifelse(is.na(sd) | is.na(mean) | mean == 0, NA_real_, sd / mean)
+
+NW_Med_Osc_summary <- merged_NW_Mediterranean_row_data %>%
+  group_by(Unique_Code) %>%
+  summarise(
+    # מזהים – לקחת את הערך הלא-NA הראשון אם יש
+    Species_name       = dplyr::first(na.omit(Species_name)),
+    Species            = dplyr::first(na.omit(Species)),
+    Individual         = dplyr::first(na.omit(Individual)),
+    Oscula             = dplyr::first(na.omit(Oscula)),
+    Size_Class         = dplyr::first(na.omit(Size_Class)),
+    Volume_ml          = dplyr::first(na.omit(Volume_ml)),
+    osculum_area_mm2   = dplyr::first(na.omit(osculum_area_mm2)),
+    Osculum_sizeClass  = dplyr::first(na.omit(Osculum_sizeClass)),
+
+    # טמפרטורה
+    Temp_mean   = mean(Temp, na.rm = TRUE),
+    Temp_median = median(Temp, na.rm = TRUE),
+    Temp_sd     = sd(Temp, na.rm = TRUE),
+    Temp_n      = sum(!is.na(Temp)),
+    Temp_CI95   = safe_ci(Temp_sd, Temp_n),
+    Temp_CV     = safe_cv(Temp_sd, Temp_mean),
+
+    # Delta O2
+    Delta_O2_umol_L_mean   = mean(Delta_O2_umol_L, na.rm = TRUE),
+    Delta_O2_umol_L_median = median(Delta_O2_umol_L, na.rm = TRUE),
+    Delta_O2_umol_L_sd     = sd(Delta_O2_umol_L, na.rm = TRUE),
+    Delta_O2_umol_L_n      = sum(!is.na(Delta_O2_umol_L)),
+    Delta_O2_umol_L_CI95   = safe_ci(Delta_O2_umol_L_sd, Delta_O2_umol_L_n),
+    Delta_O2_umol_L_CV     = safe_cv(Delta_O2_umol_L_sd, Delta_O2_umol_L_mean),
+
+    # OFR
+    OFR_L_hr_mean   = mean(OFR_L_hr, na.rm = TRUE),
+    OFR_L_hr_median = median(OFR_L_hr, na.rm = TRUE),
+    OFR_L_hr_sd     = sd(OFR_L_hr, na.rm = TRUE),
+    OFR_L_hr_n      = sum(!is.na(OFR_L_hr)),
+    OFR_L_hr_CI95   = safe_ci(OFR_L_hr_sd, OFR_L_hr_n),
+    OFR_L_hr_CV     = safe_cv(OFR_L_hr_sd, OFR_L_hr_mean)
+  ) %>%
+  mutate(
+    # לחשב R רק כשיש גם DeltaO2 וגם OFR
+    R_Osc_umol_hr = ifelse(
+      !is.na(Delta_O2_umol_L_mean) & !is.na(OFR_L_hr_mean),
+      Delta_O2_umol_L_mean * OFR_L_hr_mean,
+      NA_real_
+    )
+  ) %>%
+  ungroup()
+
+
+NW_Ind_summary <- NW_Med_Osc_summary %>%
+  group_by(Species, Individual) %>%
+  summarise(
+    # מזהים
+    Species_name = first(Species_name),
+    Size_Class   = first(Size_Class),
+    Osculum_sizeClass = first(Osculum_sizeClass),
+    Volume_ml    = first(Volume_ml),
+
+    # כמות האוסקולות
+    n_oscula = n(),   # מספר האוסקולות לפרט
+
+    # שטחי אוסקולה
+    osculum_area_mm2_mean   = mean(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_median = median(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_sd     = sd(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_n      = sum(!is.na(osculum_area_mm2)),
+    osculum_area_mm2_CI95   = 1.96 * osculum_area_mm2_sd / sqrt(osculum_area_mm2_n),
+    osculum_area_mm2_CV     = osculum_area_mm2_sd / osculum_area_mm2_mean,
+    osculum_area_mm2_max    = max(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_min    = min(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_sum        = sum(osculum_area_mm2, na.rm = TRUE),
+
+    # ממוצעי טמפ'
+    Temp_mean_mean   = mean(Temp_mean, na.rm = TRUE),
+    Temp_mean_median = median(Temp_mean, na.rm = TRUE),
+    Temp_mean_sd     = sd(Temp_mean, na.rm = TRUE),
+    Temp_mean_n      = sum(!is.na(Temp_mean)),
+    Temp_mean_CI95   = 1.96 * Temp_mean_sd / sqrt(Temp_mean_n),
+    Temp_mean_CV     = Temp_mean_sd / Temp_mean_mean,
+
+    # Delta O2
+    Delta_O2_umol_L_mean_mean   = mean(Delta_O2_umol_L_mean, na.rm = TRUE),
+    Delta_O2_umol_L_mean_median = median(Delta_O2_umol_L_mean, na.rm = TRUE),
+    Delta_O2_umol_L_mean_sd     = sd(Delta_O2_umol_L_mean, na.rm = TRUE),
+    Delta_O2_umol_L_mean_n      = sum(!is.na(Delta_O2_umol_L_mean)),
+    Delta_O2_umol_L_mean_CI95   = 1.96 * Delta_O2_umol_L_mean_sd / sqrt(Delta_O2_umol_L_mean_n),
+    Delta_O2_umol_L_mean_CV     = Delta_O2_umol_L_mean_sd / Delta_O2_umol_L_mean_mean,
+
+    # OFR לאוסקולה ולפרט
+    OFR_L_hr_mean_mean   = mean(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_median = median(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_sd     = sd(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_n      = sum(!is.na(OFR_L_hr_mean)),
+    OFR_L_hr_mean_CI95   = 1.96 * OFR_L_hr_mean_sd / sqrt(OFR_L_hr_mean_n),
+    OFR_L_hr_mean_CV     = OFR_L_hr_mean_sd / OFR_L_hr_mean_mean,
+    OFR_L_hr_mean_max    = max(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_min    = min(OFR_L_hr_mean, na.rm = TRUE),
+
+    # סכום OFR של כל האוסקולות (לפי פרט)
+    PR_L_hr = sum(OFR_L_hr_mean, na.rm = TRUE),
+
+    # חישוב Pumping Rate – סכום OFR חלקי נפח
+    PRV_L_hr_ml = ifelse(is.na(Volume_ml) | Volume_ml == 0, NA, PR_L_hr / Volume_ml),
+
+    # חישוב Total_respiration ו-Specific_respiration (מבוסס ממוצע דלתא O2)
+    Rind_umol_hr = PR_L_hr * Delta_O2_umol_L_mean_mean,
+    RV_umol_hr_ml = PRV_L_hr_ml * Delta_O2_umol_L_mean_mean
+  ) %>%
+  ungroup()
+
+
+
+```
+
+
+##Red_Sea_merged_row_data
+```{r, fig.width=16,fig.height=10}
+
+
+species_code_lookup <- c(
+  "C.cyathophora"   = "06",
+  "C.siphonella"    = "04",
+  "M.fistulifera"   = "05",
+  "D.erythraeanus"  = "02",
+  "N.rowi"          = "07",
+  "S.clavatus"      = "03",
+  "T.swinhoei"      = "01"
+)
+
+Eilat_Oxygen_removal_Data<-read.csv("C:/Users/ASUS/Google Drive/Sponge/Data Analysis/metabolic rates/Sunrise_Sunset_respiration_Data.csv")
+
+
+# קובץ נקי עם שמות אחידים והתאמה לסגנון DeltaO2_data (בלי טורים חסרים)
+Eilat_clean <- Eilat_Oxygen_removal_Data %>%
+  rename(
+    Species_name = Taxa_cod,
+    Individual   = Sponge_Cod,
+    Oscula       = Osc_cod,
+    DateTime_raw = Date_and_Time,
+    Temp         = external_temperature,
+    O2_In        = AMB,
+    O2_Ex        = EX,
+    Delta_O2     = Delta
+  ) %>%
+  mutate(
+    DateTime     = ymd_hms(DateTime_raw),
+    Species_name = as.factor(Species_name),
+    Individual   = as.character(Individual),
+    Oscula       = as.integer(Oscula),
+    DateTime     = as.POSIXct(DateTime),
+    Temp         = as.numeric(Temp),
+    O2_In        = as.numeric(O2_In),
+    O2_Ex        = as.numeric(O2_Ex),
+    Delta_O2     = as.numeric(Delta_O2)
+  ) %>%
+   dplyr::select(Species_name, Individual, Oscula, DateTime, Temp, O2_In, O2_Ex, Delta_O2)
+
+
+
+
+Eilat_clean <- Eilat_clean %>%
+  mutate(
+    Species_code = species_code_lookup[as.character(Species_name)],
+    Unique_Code  = paste(Species_code, Individual, Oscula, sep = ".")
+  ) %>%
+  relocate(Unique_Code, .before = Species_name)
+
+Eilat_clean <- Eilat_clean %>%
+  mutate(
+    Species = case_when(
+      Species_name == "T.swinhoei"      ~ "T.swinhoei",
+      Species_name == "C.cyathophora"   ~ "C.cyathophora",
+      Species_name == "C.siphonella"    ~ "C.siphonella",
+      Species_name == "M.fistulifera"   ~ "M.fistulifera",
+      Species_name == "D.erythraeanus"  ~ "D.erythraeanus",
+      Species_name == "N.rowi"          ~ "N.rowi",
+      Species_name == "S.clavatus"      ~ "S.clavatus",
+      TRUE ~ NA_character_
+    ),
+    Snapshot_Dailycycle = "Daily cycle", # ערך קבוע
+    Site                = "Eilat",       # ערך קבוע
+    Sampler             = "Rai_Raz",     # ערך קבוע
+    Depth_m             = "5_10",        # ערך קבוע (אם זה מספרי תעדכני ל-5 או 10)
+    Time_period         = NA_character_  # אם יש לך מידע – אפשר לעדכן
+  )
+
+
+Eilat_clean <- Eilat_clean %>%
+  dplyr::select(
+    Unique_Code, Species_name, Species, Snapshot_Dailycycle, Individual, Oscula,
+    DateTime, Site, Sampler, Temp, Depth_m, Time_period, O2_In, O2_Ex, Delta_O2
+  )
+
+
+
+species_code_lookup <- c(
+  "C.cyathophora"   = "06",
+  "C.siphonella"    = "04",
+  "M.fistulifera"   = "05",
+  "D.erythraeanus"  = "02",
+  "N.rowi"          = "07",
+  "S.clavatus"      = "03",
+  "T.swinhoei"      = "01"
+)
+
+
+Eilat_Volume_Data<-read.csv("C:/Users/ASUS/Google Drive/Sponge/Data Analysis/metabolic rates/Osculum_area_Volume.csv")
+
+Eilat_Volume_Data_clean <- Eilat_Volume_Data %>%
+  rename(
+    Species_name = Taxa_cod,
+    Individual = Sponge_cod,
+    Oscula = Osc_cod,
+    Oscula_Area_mm2 = Osc_Area_mm2,
+    Volume_ml = Volume_mL
+  ) %>%
+  mutate(
+    Species_name = as.factor(Species_name),
+    Individual = as.character(Individual),
+    Oscula = as.integer(Oscula),
+    Volume_ml = as.numeric(Volume_ml),
+    Oscula_Area_mm2 = as.numeric(Oscula_Area_mm2)
+  ) %>%
+   dplyr::select(Species_name, Individual, Oscula, Volume_ml, Oscula_Area_mm2)
+
+
+
+Eilat_Volume_Data <- Eilat_Volume_Data %>%
+  # שינוי שמות לעברית-מדעי אחיד
+  rename(
+    Species_name      = Taxa,
+    Species           = Taxa_cod,
+    Individual        = Sponge_cod,
+    Oscula            = Osc_cod,
+    osculum_area_mm2  = Osc_Area_mm2,
+    Volume_ml         = Volume_mL
+  ) %>%
+  # המרת עמודות למחרוזת
+  mutate(
+    Species_name = as.character(Species_name),
+    Species      = as.character(Species),
+    Individual   = as.character(Individual),
+    Oscula       = as.character(Oscula)
+  ) %>%
+  # בניית Unique_Code
+  mutate(
+    Species_code = species_code_lookup[Species],
+    Unique_Code  = paste(Species_code, Individual, Oscula, sep = ".")
+  )
+
+Eilat_DFS_Data<-read.csv("C:/Users/ASUS/Google Drive/Sponge/Data Analysis/metabolic rates/DFS_25022021.csv")
+
+
+# קובץ נקי עם שמות אחידים והתאמה לסגנון DeltaO2_data (בלי טורים חסרים)
+Eilat_DFS_clean <- Eilat_DFS_Data %>%
+  rename(
+    Species_name = Taxa_cod,
+    Individual   = Sponge_cod,
+    Oscula       = Osc_cod,
+    OFR_ml_s     = Pumping_rate_ml_s.1,
+  ) %>%
+  mutate(
+    DateTime     = ymd_hms(Date_Time),
+    Species_name = as.factor(Species_name),
+    Individual   = as.character(Individual),
+    Oscula       = as.integer(Oscula),
+    DateTime     = as.POSIXct(DateTime),
+    OFR_ml_s        = as.numeric(OFR_ml_s)
+  ) %>%
+   dplyr::select(Species_name, Individual, Oscula, DateTime, DFS_run, OFR_ml_s )
+
+
+Eilat_DFS_clean <-Eilat_DFS_clean %>%
+  mutate(OFR_ml_min = OFR_ml_s * 60)
+
+Eilat_DFS_clean <- Eilat_DFS_clean %>%
+  # המרה למחרוזות (לפני הדבקה!)
+  mutate(
+    Species_name = as.character(Species_name),
+    Individual   = as.character(Individual),
+    Oscula       = as.character(Oscula)
+  ) %>%
+  # שינוי שם עמודה
+  rename(Species = Species_name) %>%
+  # בניית עמודות קוד ו-Unique_Code
+  mutate(
+    Species_code = species_code_lookup[Species],
+    Unique_Code  = paste(Species_code, Individual, Oscula, sep = ".")
+  )
+
+Eilat_DFS_means <- Eilat_DFS_clean %>%
+  group_by(Unique_Code) %>%
+  summarise(
+    Species        = first(Species),
+    Species_code   = first(Species_code),
+    Individual     = first(Individual),
+    Oscula         = first(Oscula),
+    OFR_ml_min_mean = mean(OFR_ml_min , na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+ rename(OFR_ml_min = OFR_ml_min_mean) 
+
+# ודא ש-Unique_Code בשני הקבצים הוא character
+Eilat_DFS_means$Unique_Code      <- as.character(Eilat_DFS_means$Unique_Code)
+Eilat_Volume_Data$Unique_Code    <- as.character(Eilat_Volume_Data$Unique_Code)
+
+# מיזוג לפי Unique_Code (left_join כדי לשמור את כל השורות מה-DFS)
+Eilat_DFS_merged <- Eilat_DFS_means %>%
+  left_join(Eilat_Volume_Data %>%
+              dplyr::select(Unique_Code, Volume_ml, osculum_area_mm2),  # אפשר לבחור רק את העמודות הרצויות
+            by = "Unique_Code")
+
+Eilat_DFS_merged_aligned <- Eilat_DFS_merged %>%
+  mutate(
+    Individual = as.character(Individual),           # מייצר עמודה כמו בקובץ השני
+    Oscula = as.integer(Oscula),                            # המרה למספר
+    Size_Class = NA                                         # להשלמת מבנה (אם אין מידע)
+  ) %>%
+  dplyr::select(
+    Unique_Code,
+    Species,
+    Individual,
+    Oscula,
+    OFR_ml_min,
+    osculum_area_mm2,
+    Volume_ml,
+    Size_Class
+  )
+
+# ודא/י ש-Oscula הוא integer בשני הקבצים
+Eilat_clean$Oscula <- as.integer(Eilat_clean$Oscula)
+Eilat_DFS_merged_aligned$Oscula <- as.integer(Eilat_DFS_merged_aligned$Oscula)
+
+
+
+# מוסיפים עמודה חדשה לטבלה
+Eilat_DFS_merged_aligned <- Eilat_DFS_merged_aligned %>%
+  mutate(Osculum_sizeClass = size_class_fun(Species, osculum_area_mm2))
+
+Eilat_DFS_merged_aligned <- Eilat_DFS_merged_aligned %>%
+  mutate(OFR_L_hr = OFR_ml_min * 0.06)
+
+
+Eilat_clean <- Eilat_clean %>%
+  rename(O2_In_umol_L= O2_In, O2_Ex_umol_L=O2_Ex,Delta_O2_umol_L=Delta_O2  )%>%
+  mutate(
+    O2_In_umol_L    = as.numeric(O2_In_umol_L),
+    O2_Ex_umol_L    = as.numeric(O2_Ex_umol_L ),
+    Delta_O2_umol_L = as.numeric(Delta_O2_umol_L )
+  )
+
+
+# איחוד לפי Unique_Code, Species, Individual, Oscula
+Red_Sea_merged_row_data <- Eilat_clean %>%
+  left_join(
+    Eilat_DFS_merged_aligned,
+    by = c("Unique_Code", "Species", "Individual", "Oscula")
+  )
+
+
+```
+
+##Red_Sea_2018_2019_summary
+```{r, fig.width=16,fig.height=10}
+
+
+Red_Sea_Osc_summary <- Red_Sea_merged_row_data %>%
+  group_by(Unique_Code) %>%
+  summarise(
+    Species_name = first(Species_name),
+    Species = first(Species),
+    Individual = first(Individual),
+    Oscula = first(Oscula),
+    Size_Class = first(Size_Class),
+    Volume_ml = first(Volume_ml), 
+    osculum_area_mm2 = first(osculum_area_mm2),
+    Osculum_sizeClass = first(Osculum_sizeClass), 
+
+    Temp_mean = mean(Temp, na.rm = TRUE),
+    Temp_median = median(Temp, na.rm = TRUE),
+    Temp_sd = sd(Temp, na.rm = TRUE),
+    Temp_n = sum(!is.na(Temp)),
+    Temp_CI95 = 1.96 * Temp_sd / sqrt(Temp_n),
+    Temp_CV = Temp_sd / Temp_mean,
+
+    Delta_O2_umol_L_mean = mean(Delta_O2_umol_L, na.rm = TRUE),
+    Delta_O2_umol_L_median = median(Delta_O2_umol_L, na.rm = TRUE),
+    Delta_O2_umol_L_sd = sd(Delta_O2_umol_L, na.rm = TRUE),
+    Delta_O2_umol_L_n = sum(!is.na(Delta_O2_umol_L)),
+    Delta_O2_umol_L_CI95 = 1.96 * Delta_O2_umol_L_sd / sqrt(Delta_O2_umol_L_mean),
+    Delta_O2_umol_L_CV = Delta_O2_umol_L_sd / Delta_O2_umol_L_mean,
+
+    OFR_L_hr_mean = mean(OFR_L_hr, na.rm = TRUE),
+    OFR_L_hr_median = median(OFR_L_hr, na.rm = TRUE),
+    OFR_L_hr_sd = sd(OFR_L_hr, na.rm = TRUE),
+    OFR_L_hr_n = sum(!is.na(OFR_L_hr)),
+    OFR_L_hr_CI95 = 1.96 * OFR_L_hr_sd / sqrt(OFR_L_hr_n),
+    OFR_L_hr_CV = OFR_L_hr_sd / OFR_L_hr_mean,
+    
+    
+    # חישוב נשימה לאוסקולה 
+    R_Osc_umol_hr= Delta_O2_umol_L_mean*OFR_L_hr_mean
+    
+  ) %>%
+  ungroup()
+
+
+Red_Sea_Ind_summary <- Red_Sea_Osc_summary %>%
+  group_by(Species, Individual) %>%
+  summarise(
+    # מזהים
+    Species_name = first(Species_name),
+    Size_Class   = first(Size_Class),
+    Osculum_sizeClass = first(Osculum_sizeClass),
+    Volume_ml    = first(Volume_ml),
+
+    # כמות האוסקולות
+    n_oscula = n(),   # מספר האוסקולות לפרט
+
+    # שטחי אוסקולה
+    osculum_area_mm2_mean   = mean(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_median = median(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_sd     = sd(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_n      = sum(!is.na(osculum_area_mm2)),
+    osculum_area_mm2_CI95   = 1.96 * osculum_area_mm2_sd / sqrt(osculum_area_mm2_n),
+    osculum_area_mm2_CV     = osculum_area_mm2_sd / osculum_area_mm2_mean,
+    osculum_area_mm2_max    = max(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_min    = min(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_sum        = sum(osculum_area_mm2, na.rm = TRUE),
+
+    # ממוצעי טמפ'
+    Temp_mean_mean   = mean(Temp_mean, na.rm = TRUE),
+    Temp_mean_median = median(Temp_mean, na.rm = TRUE),
+    Temp_mean_sd     = sd(Temp_mean, na.rm = TRUE),
+    Temp_mean_n      = sum(!is.na(Temp_mean)),
+    Temp_mean_CI95   = 1.96 * Temp_mean_sd / sqrt(Temp_mean_n),
+    Temp_mean_CV     = Temp_mean_sd / Temp_mean_mean,
+
+    # Delta O2
+    Delta_O2_umol_L_mean_mean   = mean(Delta_O2_umol_L_mean, na.rm = TRUE),
+    Delta_O2_umol_L_mean_median = median(Delta_O2_umol_L_mean, na.rm = TRUE),
+    Delta_O2_umol_L_mean_sd     = sd(Delta_O2_umol_L_mean, na.rm = TRUE),
+    Delta_O2_umol_L_mean_n      = sum(!is.na(Delta_O2_umol_L_mean)),
+    Delta_O2_umol_L_mean_CI95   = 1.96 * Delta_O2_umol_L_mean_sd / sqrt(Delta_O2_umol_L_mean_n),
+    Delta_O2_umol_L_mean_CV     = Delta_O2_umol_L_mean_sd / Delta_O2_umol_L_mean_mean,
+
+    # OFR לאוסקולה ולפרט
+    OFR_L_hr_mean_mean   = mean(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_median = median(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_sd     = sd(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_n      = sum(!is.na(OFR_L_hr_mean)),
+    OFR_L_hr_mean_CI95   = 1.96 * OFR_L_hr_mean_sd / sqrt(OFR_L_hr_mean_n),
+    OFR_L_hr_mean_CV     = OFR_L_hr_mean_sd / OFR_L_hr_mean_mean,
+    OFR_L_hr_mean_max    = max(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_min    = min(OFR_L_hr_mean, na.rm = TRUE),
+
+    # סכום OFR של כל האוסקולות (לפי פרט)
+    PR_L_hr = sum(OFR_L_hr_mean, na.rm = TRUE),
+
+    # חישוב Pumping Rate – סכום OFR חלקי נפח
+    PRV_L_hr_ml = ifelse(is.na(Volume_ml) | Volume_ml == 0, NA, PR_L_hr / Volume_ml),
+
+    # חישוב Total_respiration ו-Specific_respiration (מבוסס ממוצע דלתא O2)
+    Rind_umol_hr = PR_L_hr * Delta_O2_umol_L_mean_mean,
+    RV_umol_hr_ml = PRV_L_hr_ml * Delta_O2_umol_L_mean_mean
+  ) %>%
+  ungroup()
+
+
+
+```
+
+## Eilat2024_merged__row_data
+```{r, fig.width=16,fig.height=10}
+
+Eilat2024_oxygen_delta <- readRDS("Eilat2024_oxygen_delta.rds")
+
+
+Eilat2024_oxygen_delta <- Eilat2024_oxygen_delta %>%
+  mutate(
+    # מפרק לשני חלקים
+    Unique_Code = paste0(
+      sprintf("%02d", as.numeric(sub("\\..*", "", Unique_Code))), # מוסיף 0 מוביל לחלק הראשון
+      ".",
+      sub("^[^.]*\\.", "", Unique_Code), # החלק אחרי הנקודה
+      ".1"
+    )
+  )
+
+
+Eilat2024_oxygen_delta_aligned <- Eilat2024_oxygen_delta %>%
+  # שינוי שמות עמודות
+  rename(
+    Individual = Sponge_num,
+    Volume_ml = Species_volume,
+    Temp = mean_temp
+  ) %>%
+  # יצירת עמודות חדשות/קבועות + דואגים לעמודות NA
+  mutate(
+    Oscula      = 1,
+    Site        = "Eilat",
+    Sampler     = "Gitai_Carmael",
+    Depth_m     = "10",
+    Time_period = NA_character_,
+    O2_In_umol_L = NA_real_,    # נוסיף עמודות ריקות
+    O2_Ex_umol_L = NA_real_,
+    Delta_O2_umol_L = delta,    # כאן לוקחים את הערך מ־delta
+    DateTime    = rounddatetime
+  ) %>%
+  dplyr::select(
+    Unique_Code,
+    Species,
+    Individual,
+    Oscula,
+    Site,
+    Sampler,
+    Depth_m,
+    Time_period,
+    O2_In_umol_L,
+    O2_Ex_umol_L,
+    DateTime,
+    Temp,
+    Delta_O2_umol_L
+  )
+
+
+Eilat2024_OFR_data <- readRDS("Eilat2024_OFR_data.rds")
+
+
+Eilat2024_OFR_data <- Eilat2024_OFR_data %>%
+  mutate(
+    Unique_Code = paste0(
+      str_pad(str_extract(Unique_Code, "^[0-9]+"), width = 2, pad = "0"),
+      ".",
+      str_extract(Unique_Code, "(?<=\\.)[0-9]+"),
+      ".1"
+    )
+  )
+
+Eilat2024_OFR_data <- Eilat2024_OFR_data %>%
+  mutate(
+    OFR_ml_min = `OFR_(L _hr-1)` * 1000 / 60
+  )
+
+
+Eilat2024_OFR_data <- Eilat2024_OFR_data %>%
+  rename(
+    Individual     = Sponge_num,
+    OFR_L_hr       = `OFR_(L _hr-1)`,
+    Osculum_area_mm2 = `Osculum_area_(mm2)`
+) 
+
+
+# לקרוא את הגיליון MataDat מה־Google Sheet
+sheet_id <- "1mDfXbu7fQw9FL2hBsD3cQaYvonajZIQYLgKXbsQkU9M"
+MataData <- read_sheet(sheet_id, sheet = "MataData")
+
+
+
+MataData_vol <- MataData %>%
+  dplyr::select(Individual = Sponge_num, Volume_ml = Agisoft_ml) %>%
+  filter(!is.na(Individual), !is.na(Volume_ml)) %>% # מסנן NA
+  distinct(Individual, .keep_all = TRUE)
+
+
+
+# מאחדים על בסיס מספר הספוג
+Eilat2024_OFR_summary_merged <-Eilat2024_OFR_data %>%
+  left_join(MataData_vol, by = c( "Individual"))
+
+
+Eilat2024_OFR_summary_grouped <- Eilat2024_OFR_summary_merged %>%
+  group_by(Unique_Code, Species, Individual, Volume_ml, Osculum_area_mm2) %>%
+  summarise(
+    OFR_L_hr = mean(OFR_L_hr, na.rm = TRUE),
+    OFR_ml_min = mean(OFR_ml_min, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Individual = as.character(Individual),  # המרת טיפוס כאן!
+    Oscula = as.integer(1),
+    Size_Class = as.logical(NA),
+    Osculum_sizeClass = as.character(NA)
+  ) %>%
+  dplyr::select(
+    Unique_Code,
+    Species,
+    Individual,
+    Oscula,
+    OFR_ml_min,
+    osculum_area_mm2 = Osculum_area_mm2,
+    Volume_ml,
+    Size_Class,
+    Osculum_sizeClass,
+    OFR_L_hr
+  )
+
+Eilat2024_oxygen_delta_aligned <- Eilat2024_oxygen_delta_aligned %>%
+  mutate(
+    Individual = as.character(Individual)   # המרה כאן!
+  )
+
+Eilat2024_merged__row_data <- full_join(
+  Eilat2024_oxygen_delta_aligned,
+  Eilat2024_OFR_summary_grouped,
+  by = c("Unique_Code", "Species", "Individual", "Oscula")
+)
+
+
+
+```
+
+
+## Eilat2024_summary
+```{r, fig.width=16,fig.height=10}
+Eilat2024_Osc_summary <- Eilat2024_merged__row_data %>%
+  group_by(Unique_Code) %>%
+ summarise(
+    Species = first(Species),
+    Individual = first(Individual),
+    Oscula = first(Oscula),
+    Size_Class = first(Size_Class),
+    Volume_ml = first(Volume_ml), 
+    osculum_area_mm2 = first(osculum_area_mm2),
+    Osculum_sizeClass = first(Osculum_sizeClass), 
+
+    Temp_mean = mean(Temp, na.rm = TRUE),
+    Temp_median = median(Temp, na.rm = TRUE),
+    Temp_sd = sd(Temp, na.rm = TRUE),
+    Temp_n = sum(!is.na(Temp)),
+    Temp_CI95 = 1.96 * Temp_sd / sqrt(Temp_n),
+    Temp_CV = Temp_sd / Temp_mean,
+
+    Delta_O2_umol_L_mean = mean(Delta_O2_umol_L, na.rm = TRUE),
+    Delta_O2_umol_L_median = median(Delta_O2_umol_L, na.rm = TRUE),
+    Delta_O2_umol_L_sd = sd(Delta_O2_umol_L, na.rm = TRUE),
+    Delta_O2_umol_L_n = sum(!is.na(Delta_O2_umol_L)),
+    Delta_O2_umol_L_CI95 = 1.96 * Delta_O2_umol_L_sd / sqrt(Delta_O2_umol_L_mean),
+    Delta_O2_umol_L_CV = Delta_O2_umol_L_sd / Delta_O2_umol_L_mean,
+
+    OFR_L_hr_mean = mean(OFR_L_hr, na.rm = TRUE),
+    OFR_L_hr_median = median(OFR_L_hr, na.rm = TRUE),
+    OFR_L_hr_sd = sd(OFR_L_hr, na.rm = TRUE),
+    OFR_L_hr_n = sum(!is.na(OFR_L_hr)),
+    OFR_L_hr_CI95 = 1.96 * OFR_L_hr_sd / sqrt(OFR_L_hr_n),
+    OFR_L_hr_CV = OFR_L_hr_sd / OFR_L_hr_mean,
+    
+    
+    # חישוב נשימה לאוסקולה 
+    R_Osc_umol_hr= Delta_O2_umol_L_mean*OFR_L_hr_mean
+    
+  ) %>%
+  ungroup()
+
+Eilat2024_Ind_summary <- Eilat2024_Osc_summary %>%
+  group_by(Species, Individual) %>%
+  summarise(
+    # מזהים
+    Size_Class   = first(Size_Class),
+    Osculum_sizeClass = first(Osculum_sizeClass),
+    Volume_ml    = first(Volume_ml),
+
+    # כמות האוסקולות
+    n_oscula = n(),   # מספר האוסקולות לפרט
+
+    # שטחי אוסקולה
+    osculum_area_mm2_mean   = mean(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_median = median(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_sd     = sd(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_n      = sum(!is.na(osculum_area_mm2)),
+    osculum_area_mm2_CI95   = 1.96 * osculum_area_mm2_sd / sqrt(osculum_area_mm2_n),
+    osculum_area_mm2_CV     = osculum_area_mm2_sd / osculum_area_mm2_mean,
+    osculum_area_mm2_max    = max(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_mm2_min    = min(osculum_area_mm2, na.rm = TRUE),
+    osculum_area_sum        = sum(osculum_area_mm2, na.rm = TRUE),
+
+    # ממוצעי טמפ'
+    Temp_mean_mean   = mean(Temp_mean, na.rm = TRUE),
+    Temp_mean_median = median(Temp_mean, na.rm = TRUE),
+    Temp_mean_sd     = sd(Temp_mean, na.rm = TRUE),
+    Temp_mean_n      = sum(!is.na(Temp_mean)),
+    Temp_mean_CI95   = 1.96 * Temp_mean_sd / sqrt(Temp_mean_n),
+    Temp_mean_CV     = Temp_mean_sd / Temp_mean_mean,
+
+    # Delta O2
+    Delta_O2_umol_L_mean_mean   = mean(Delta_O2_umol_L_mean, na.rm = TRUE),
+    Delta_O2_umol_L_mean_median = median(Delta_O2_umol_L_mean, na.rm = TRUE),
+    Delta_O2_umol_L_mean_sd     = sd(Delta_O2_umol_L_mean, na.rm = TRUE),
+    Delta_O2_umol_L_mean_n      = sum(!is.na(Delta_O2_umol_L_mean)),
+    Delta_O2_umol_L_mean_CI95   = 1.96 * Delta_O2_umol_L_mean_sd / sqrt(Delta_O2_umol_L_mean_n),
+    Delta_O2_umol_L_mean_CV     = Delta_O2_umol_L_mean_sd / Delta_O2_umol_L_mean_mean,
+
+    # OFR לאוסקולה ולפרט
+    OFR_L_hr_mean_mean   = mean(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_median = median(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_sd     = sd(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_n      = sum(!is.na(OFR_L_hr_mean)),
+    OFR_L_hr_mean_CI95   = 1.96 * OFR_L_hr_mean_sd / sqrt(OFR_L_hr_mean_n),
+    OFR_L_hr_mean_CV     = OFR_L_hr_mean_sd / OFR_L_hr_mean_mean,
+    OFR_L_hr_mean_max    = max(OFR_L_hr_mean, na.rm = TRUE),
+    OFR_L_hr_mean_min    = min(OFR_L_hr_mean, na.rm = TRUE),
+
+    # סכום OFR של כל האוסקולות (לפי פרט)
+    PR_L_hr = sum(OFR_L_hr_mean, na.rm = TRUE),
+
+    # חישוב Pumping Rate – סכום OFR חלקי נפח
+    PRV_L_hr_ml = ifelse(is.na(Volume_ml) | Volume_ml == 0, NA, PR_L_hr / Volume_ml),
+
+    # חישוב Total_respiration ו-Specific_respiration (מבוסס ממוצע דלתא O2)
+    Rind_umol_hr = PR_L_hr * Delta_O2_umol_L_mean_mean,
+    RV_umol_hr_ml = PRV_L_hr_ml * Delta_O2_umol_L_mean_mean
+  ) %>%
+  ungroup()
+
+
+
+
+
+```
+
+
+## list- all_sponge_data
+```{r, fig.width=16,fig.height=10}
+
+# NW Mediterranean
+NW_Mediterranean <- list(
+  DeltaO2_NW_Mediterranean = DeltaO2_data,             # דלתא חמצן - NW Mediterranean
+  OFR_NW_Mediterranean     = OFR_NW_Mediterranean,     # OFR אוסקולה NW Mediterranean
+  NW_Med_Osc_summary       = NW_Med_Osc_summary,       # סיכום אוסקולה NW Mediterranean
+  NW_Ind_summary           = NW_Ind_summary            # סיכום אינדיבידואלי NW Mediterranean
+)
+
+# Red Sea 2018-2019
+Red_Sea_2018_2019 <- list(
+  DeltaO2_Eilat2018      = Eilat_clean,                # דלתא חמצן אילת 2018
+  OFR_Eilat2018          = Eilat_DFS_merged_aligned,   # OFR אוסקולה אילת 2018
+  Red_Sea_Osc_Eilat2018  = Red_Sea_Osc_summary,        # סיכום אוסקולה אילת 2018
+  Red_Sea_Ind_Eilat2018  = Red_Sea_Ind_summary         # סיכום אינדיבידואלי אילת 2018
+)
+
+# Red Sea 2024
+Red_Sea_2024 <- list(
+  DeltaO2_Eilat2024    = Eilat2024_oxygen_delta_aligned,   # דלתא חמצן אילת 2024
+  OFR_Eilat2024        = Eilat2024_OFR_summary_merged,     # OFR אוסקולה אילת 2024
+  Eilat2024_Osc_summary = Eilat2024_Osc_summary,           # סיכום אוסקולה אילת 2024
+  Eilat2024_Ind_summary = Eilat2024_Ind_summary            # סיכום אינדיבידואלי אילת 2024
+)
+
+# ליסט-על אחד לכל הנתונים:
+all_sponge_data <- list(
+  NW_Mediterranean   = NW_Mediterranean,
+  Red_Sea_2018_2019  = Red_Sea_2018_2019,
+  Red_Sea_2024       = Red_Sea_2024
+)
+
+
+```
+
+## list- combined Dataset
+```{r, fig.width=16,fig.height=10}
+
+DeltaO2_combined <- bind_rows(
+  all_sponge_data$NW_Mediterranean$DeltaO2_NW_Mediterranean %>%
+    mutate(
+      Depth_m = as.character(Depth_m),
+      Individual = as.character(Individual),
+      Dataset = "NW_Mediterranean"
+    ),
+  all_sponge_data$Red_Sea_2018_2019$DeltaO2_Eilat2018 %>%
+    mutate(
+      Depth_m = as.character(Depth_m),
+      Individual = as.character(Individual),
+      Dataset = "Red_Sea_2018_2019"
+    ),
+  all_sponge_data$Red_Sea_2024$DeltaO2_Eilat2024 %>%
+    mutate(
+      Depth_m = as.character(Depth_m),
+      Individual = as.character(Individual),
+      Dataset = "Red_Sea_2024"
+    )
+)
+
+write.csv(DeltaO2_combined,"DeltaO2_combined.csv")
+
+OFR_combined <- bind_rows(
+  all_sponge_data$NW_Mediterranean$OFR_NW_Mediterranean %>%
+    mutate(Individual = as.character(individual_number),
+           Dataset = "NW_Mediterranean") %>%
+    dplyr::select(-individual_number),  # להסיר את העמודה הישנה
+  
+  all_sponge_data$Red_Sea_2018_2019$OFR_Eilat2018 %>%
+    mutate(Individual = as.character(Individual),
+           Dataset = "Red_Sea_2018_2019"),
+  
+  all_sponge_data$Red_Sea_2024$OFR_Eilat2024 %>%
+    mutate(Individual = as.character(Individual),
+           Dataset = "Red_Sea_2024")
+)
+
+write.csv(OFR_combined,"OFR_combined.csv")
+
+Osc_summary_combined <- bind_rows(
+  all_sponge_data$NW_Mediterranean$NW_Med_Osc_summary %>%
+    mutate(Individual = as.character(Individual),
+           Dataset = "NW_Mediterranean"),
+  all_sponge_data$Red_Sea_2018_2019$Red_Sea_Osc_Eilat2018 %>%
+    mutate(Individual = as.character(Individual),
+           Dataset = "Red_Sea_2018_2019"),
+  all_sponge_data$Red_Sea_2024$Eilat2024_Osc_summary %>%
+    mutate(Individual = as.character(Individual),
+           Dataset = "Red_Sea_2024")
+)
+
+write.csv(Osc_summary_combined,"Osc_summary_combined.csv")
+
+Ind_summary_combined <- bind_rows(
+  all_sponge_data$NW_Mediterranean$NW_Ind_summary %>%
+    mutate(Individual = as.character(Individual),
+           Dataset = "NW_Mediterranean"),
+  all_sponge_data$Red_Sea_2018_2019$Red_Sea_Ind_Eilat2018 %>%
+    mutate(Individual = as.character(Individual),
+           Dataset = "Red_Sea_2018_2019"),
+  all_sponge_data$Red_Sea_2024$Eilat2024_Ind_summary %>%
+    mutate(Individual = as.character(Individual),
+           Dataset = "Red_Sea_2024")
+)
+
+write.csv(Ind_summary_combined ,"Ind_summary_combined.csv")
+
+
+# מיפוי בין Species ל-HMA/LMA
+hma_lma_map <- c(
+  "A.oroides"      = "HMA",
+  "C.reniformis"   = "HMA",
+  "D.avara"        = "LMA",
+  "C.cyathophora"  = "LMA",
+  "C.siphonella"   = "LMA",
+  "D.erythraeanus" = "HMA",
+  "M.fistulifera"  = "LMA",
+  "N.rowi"         = "LMA",
+  "S.clavatus"     = "HMA",
+  "T.swinhoei"     = "HMA"
+)
+
+# מוסיפים את הטור לטבלה
+Ind_summary_combined$HMA_LMA <- hma_lma_map[Ind_summary_combined$Species]
+
+
+
+
+all_sponge_data$combined <- list(
+  DeltaO2   = DeltaO2_combined,
+  OFR       = OFR_combined,
+  Osc_summary = Osc_summary_combined,
+  Ind_summary = Ind_summary_combined
+)
+
+
+# לשמור ל־RDS:
+saveRDS(all_sponge_data, "all_sponge_data.rds")
+
+
+
+```
+
+
+## Osculum_Ind_summary_table 
+```{r, fig.width=16,fig.height=10}
+
+Ind_summary_df <- as.data.frame(all_sponge_data$combined$Ind_summary) 
+
+
+# יצירת טבלאות ביניים עם עמודת Volume_ml בכל קבוצה/מין
+
+# --- A.oroides לפי קטגוריית גודל אוסקולה ---
+aoroides_groups <- Ind_summary_df %>%
+  filter(Species == "A.oroides", !is.na(Osculum_sizeClass)) %>%
+  group_by(Dataset, Species, Group = Osculum_sizeClass) %>%
+  summarise(
+    n_individuals           = n(),
+    Volume_ml               = mean(Volume_ml, na.rm = TRUE),        # ממוצע נפח
+    avg_OFR_L_hr            = mean(OFR_L_hr_mean_mean, na.rm = TRUE),
+    avg_Delta_O2_umol_L     = mean(Delta_O2_umol_L_mean_mean, na.rm = TRUE),
+    avg_PR_L_hr             = mean(PR_L_hr, na.rm = TRUE),
+    avg_Rind_umol_hr        = mean(Rind_umol_hr, na.rm = TRUE),
+    avg_RV_umol_hr_ml       = mean(RV_umol_hr_ml, na.rm = TRUE),
+    avg_osculum_area_mm2    = mean(osculum_area_mm2_mean, na.rm = TRUE),
+    avg_osculum_area_mm2_sum= mean(osculum_area_sum, na.rm = TRUE),
+    Group_type = "Osculum_sizeClass",
+    .groups = 'drop'
+  )
+
+# --- שאר המינים Red Sea 2018/2019 – כל שורה זה פרט ---
+red_sea_2018_2019 <- Ind_summary_df %>%
+  filter(Dataset == "Red_Sea_2018_2019", Species != "A.oroides") %>%
+  mutate(
+    Group                   = Species,
+    Group_type              = "Species",
+    n_individuals           = 1,
+    Volume_ml               = Volume_ml,  # שימור נפח הפרט
+    avg_OFR_L_hr            = OFR_L_hr_mean_mean,
+    avg_Delta_O2_umol_L     = Delta_O2_umol_L_mean_mean,
+    avg_PR_L_hr             = PR_L_hr,
+    avg_Rind_umol_hr        = Rind_umol_hr,
+    avg_RV_umol_hr_ml       = RV_umol_hr_ml,
+    avg_osculum_area_mm2    = osculum_area_mm2_mean,
+    avg_osculum_area_mm2_sum= osculum_area_sum
+  ) %>%
+  dplyr::select(
+    Dataset, Species, Group, Group_type, n_individuals, Volume_ml,
+    avg_OFR_L_hr, avg_Delta_O2_umol_L, avg_PR_L_hr,
+    avg_Rind_umol_hr , avg_RV_umol_hr_ml,
+    avg_osculum_area_mm2, avg_osculum_area_mm2_sum
+  )
+
+# --- Red_Sea_2024 – קיבוץ לפי מין ---
+red_sea_2024 <- Ind_summary_df %>%
+  filter(Dataset == "Red_Sea_2024") %>%
+  group_by(Dataset, Species, Group = Species) %>%
+  summarise(
+    n_individuals           = n(),
+    Volume_ml               = mean(Volume_ml, na.rm = TRUE),        # ממוצע נפח!
+    avg_OFR_L_hr            = mean(OFR_L_hr_mean_mean, na.rm = TRUE),
+    avg_Delta_O2_umol_L     = mean(Delta_O2_umol_L_mean_mean, na.rm = TRUE),
+    avg_PR_L_hr             = mean(PR_L_hr, na.rm = TRUE),
+    avg_Rind_umol_hr        = mean(Rind_umol_hr, na.rm = TRUE),
+    avg_RV_umol_hr_ml       = mean(RV_umol_hr_ml  , na.rm = TRUE),
+    avg_osculum_area_mm2     = mean(osculum_area_mm2_mean, na.rm = TRUE),
+    avg_osculum_area_mm2_sum = mean(osculum_area_sum, na.rm = TRUE),
+    Group_type = "Species",
+    .groups = 'drop'
+  )
+
+# --- מאחדים הכל לטבלה אחת ---
+Osculum_Ind_summary_table <- bind_rows(aoroides_groups, red_sea_2018_2019, red_sea_2024)
+
+# הוספת עמודת HMA_LMA מהטבלה הראשית לכל שורה (ע"פ Species)
+hma_lma_map <- Ind_summary_df %>%
+  dplyr::select(Species, HMA_LMA) %>%
+  distinct()
+
+Osculum_Ind_summary_table <- Osculum_Ind_summary_table %>%
+  left_join(hma_lma_map, by = "Species")
+
+Osculum_Ind_summary_table <- Osculum_Ind_summary_table %>%
+  mutate(
+    PRsumOSA = avg_PR_L_hr / avg_osculum_area_mm2_sum,
+    RsumOSA  = avg_Rind_umol_hr / avg_osculum_area_mm2_sum
+  )
+
+
+
+
+```
+
+
+## SizeClass_Ind_summary_table 
+```{r, fig.width=16,fig.height=10}
+
+Ind_summary_df <- as.data.frame(all_sponge_data$combined$Ind_summary)
+
+# --- A.oroides לפי Size_Class (כ- character) ---
+aoroides_groups <- Ind_summary_df %>%
+  filter(Species == "A.oroides", !is.na(Size_Class)) %>%
+  group_by(Dataset, Species, Group = as.character(Size_Class)) %>%
+  summarise(
+    n_individuals             = n(),
+    avg_Volume_ml             = mean(Volume_ml, na.rm = TRUE),                 # הוספה: ממוצע נפח
+    avg_OFR_L_hr              = mean(OFR_L_hr_mean_mean, na.rm = TRUE),        
+    avg_Delta_O2_umol_L       = mean(Delta_O2_umol_L_mean_mean, na.rm = TRUE), 
+    avg_PR_L_hr               = mean(PR_L_hr, na.rm = TRUE),                   
+    avg_Rind_umol_hr          = mean(Rind_umol_hr, na.rm = TRUE),              
+    avg_RV_umol_hr_ml         = mean(RV_umol_hr_ml, na.rm = TRUE),             
+    avg_osculum_area_mm2      = mean(osculum_area_mm2_mean, na.rm = TRUE),     
+    avg_osculum_area_mm2_sum  = mean(osculum_area_sum, na.rm = TRUE),          
+    Group_type = "Size_Class",
+    .groups = 'drop'
+  )
+
+# --- שאר המינים Red Sea 2018/2019 – כל שורה זה פרט, Group זה המין ---
+red_sea_2018_2019 <- Ind_summary_df %>%
+  filter(Dataset == "Red_Sea_2018_2019", Species != "A.oroides") %>%
+  mutate(
+    Group                   = as.character(Species),
+    Group_type              = "Species",
+    n_individuals           = 1,
+    avg_Volume_ml           = Volume_ml,                              # הוספה: נפח לכל פרט
+    avg_OFR_L_hr            = OFR_L_hr_mean_mean,
+    avg_Delta_O2_umol_L     = Delta_O2_umol_L_mean_mean,
+    avg_PR_L_hr             = PR_L_hr,
+    avg_Rind_umol_hr        = Rind_umol_hr,
+    avg_RV_umol_hr_ml       = RV_umol_hr_ml,
+    avg_osculum_area_mm2    = osculum_area_mm2_mean,
+    avg_osculum_area_mm2_sum= osculum_area_sum
+  ) %>%
+  dplyr::select(
+    Dataset, Species, Group, Group_type, n_individuals,
+    avg_Volume_ml,                       # הוספה: נפח
+    avg_OFR_L_hr, avg_Delta_O2_umol_L,  avg_PR_L_hr,
+    avg_Rind_umol_hr , avg_RV_umol_hr_ml,
+    avg_osculum_area_mm2, avg_osculum_area_mm2_sum
+  )
+
+# --- Red_Sea_2024 – קיבוץ לפי מין (Group הוא character) ---
+red_sea_2024 <- Ind_summary_df %>%
+  filter(Dataset == "Red_Sea_2024") %>%
+  group_by(Dataset, Species, Group = as.character(Species)) %>%
+  summarise(
+    n_individuals             = n(),
+    avg_Volume_ml             = mean(Volume_ml, na.rm = TRUE),             # הוספה: ממוצע נפח
+    avg_OFR_L_hr              = mean(OFR_L_hr_mean_mean, na.rm = TRUE),
+    avg_Delta_O2_umol_L       = mean(Delta_O2_umol_L_mean_mean, na.rm = TRUE),
+    avg_PR_L_hr               = mean(PR_L_hr, na.rm = TRUE),
+    avg_Rind_umol_hr          = mean(Rind_umol_hr, na.rm = TRUE),
+    avg_RV_umol_hr_ml         = mean(RV_umol_hr_ml  , na.rm = TRUE),
+    avg_osculum_area_mm2      = mean(osculum_area_mm2_mean, na.rm = TRUE),
+    avg_osculum_area_mm2_sum  = mean(osculum_area_sum, na.rm = TRUE),
+    Group_type = "Species",
+    .groups = 'drop'
+  )
+
+# מאחדים הכל
+SizeClass_Ind_summary_table <- bind_rows(aoroides_groups, red_sea_2018_2019, red_sea_2024)
+
+
+# --- הוספת עמודת HMA_LMA מהטבלה הראשית (Ind_summary_df) לכל שורה (ע"פ Species) ---
+
+hma_lma_map <- Ind_summary_df %>%
+  dplyr::select(Species, HMA_LMA) %>%
+  distinct()
+
+SizeClass_Ind_summary_table <- SizeClass_Ind_summary_table %>%
+  left_join(hma_lma_map, by = "Species") %>%
+  relocate(HMA_LMA, .after = Species)
+
+
+
+```
+
+# Panel - Osculum_Ind_summary_table
+
+```{r, fig.width=28,fig.height=10}
+# --- Panel - Osculum_Ind_summary_table ---
+
+# הגדרת צבעים לכל מין
+species_colors <-  c(
+  "C.cyathophora"   = "#BAD6D3",
+  "C.siphonella"    = "#939ECC",
+  "D.erythraeanus"  = "#A65628",
+  "N.rowi"          = "#377EB8",
+  "S.clavatus"      = "#EEB422",
+  "T.swinhoei"      = "#8B2323",
+  "A.oroides"       = "#FF7F00",
+  "C.reniformis"    = "#BD9D80",
+  "D.avara"         = "#A680BD",
+  "M.fistulifera"   = "#E41A1C"
+)
+
+# נגדיר צורות תומכות color+fill
+shape_values_updated <- c(
+  "Red_Sea_2018_2019"    = 21,  # עיגול
+  "NW_Mediterranean"     = 24,  # משולש
+  "Red_Sea_2024"         = 22   # ריבוע
+)
+
+# פיל: HMA מלא בצבע המין, LMA ריק (לבן)
+Osculum_Ind_summary_table$fill_species <- ifelse(
+  Osculum_Ind_summary_table$HMA_LMA == "HMA",
+  species_colors[Osculum_Ind_summary_table$Species],
+  "white"
+)
+
+# Theme משותף
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  panel.grid = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  axis.line = element_line(color = "black"),
+  axis.title = element_text(size = 25),
+  axis.text = element_text(size = 20),
+  legend.text = element_text(size = 13, face = "italic"),
+  legend.title = element_text(size = 14),
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  legend.position = "right"
+)
+
+# פונקציה ליצירת גרף log-log עם קו מגמה + fill species
+plot_power_law <- function(df, xvar, yvar, xlab, ylab) {
+  data_valid <- df %>%
+    filter(!is.na(.data[[xvar]]), !is.na(.data[[yvar]]), .data[[xvar]] > 0, .data[[yvar]] > 0)
+  formula_str <- paste0("log(", yvar, ") ~ log(", xvar, ")")
+  model <- lm(as.formula(formula_str), data = data_valid)
+  sm <- summary(model)
+  a <- exp(coef(model)[1])
+  b <- coef(model)[2]
+  r2 <- sm$r.squared
+  pval <- sm$coefficients[2, "Pr(>|t|)"]
+  trend_line <- NULL
+  eq_text <- NULL
+  if (pval < 0.05) {
+    x_vals <- seq(min(data_valid[[xvar]]), max(data_valid[[xvar]]), length.out = 100)
+    y_vals <- a * x_vals^b
+    trend_line <- data.frame(x = x_vals, y = y_vals)
+    eq_text <- paste0(
+      "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+      "*','~~italic(R)^2 == ", signif(r2, 3)
+    )
+  }
+  p <- ggplot(df, aes_string(
+      x = xvar, y = yvar,
+      color = "Species", shape = "Dataset", fill = "fill_species"
+    )) +
+    geom_point(size = 5, stroke = 1.5) +
+    scale_color_manual(values = species_colors) +
+    scale_shape_manual(values = shape_values_updated) +
+    scale_fill_identity() +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = xlab, y = ylab, color = "Species", shape = "Dataset", fill = "Type") +
+    my_plot_theme
+
+  if (!is.null(trend_line)) {
+    p <- p +
+      geom_line(data = trend_line, aes(x = x, y = y),
+                inherit.aes = FALSE, color = "black", linetype = "dashed", size = 1) +
+      annotate("text",
+        x = min(data_valid[[xvar]]) * 1.4,
+        y = max(data_valid[[yvar]]) * 0.65,
+        label = eq_text, parse = TRUE,
+        hjust = 0, vjust = -0.7, size = 5
+      )
+  }
+  return(p)
+}
+
+# --- 5 איורים ---
+DeltaO2_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "avg_Delta_O2_umol_L",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")")
+)
+PR_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "avg_PR_L_hr",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression("PR (L hr"^{-1}*")")
+)
+Rind_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "avg_Rind_umol_hr",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression("R"["ind"]~ " ("*mu*"mol hr"^{-1}*")")
+)
+RsumOSA_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "RsumOSA",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression(R[sum(OSA)] ~ "(" * mu * "mol hr"^{-1}~mm^{-2}*")")
+)
+PRsumOSA_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "PRsumOSA",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression(PR[sum(OSA)] ~ "(" * "L hr"^{-1}~mm^{-2} * ")")
+)
+
+# איור 6 – סכום שטחי אוסקולה ~ Volume (בלי קו מגמה)
+sumOSA_vs_Volume_plot <- ggplot(Osculum_Ind_summary_table, aes(
+    x = avg_osculum_area_mm2_sum,
+    y = Volume_ml,
+    color = Species,
+    shape = Dataset,
+    fill  = fill_species
+  )) +
+  geom_point(size = 5, stroke = 1.5) +
+  scale_color_manual(values = species_colors) +
+  scale_shape_manual(values = shape_values_updated) +
+  scale_fill_identity() +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(
+    x = expression(Sigma~"Osculum area (mm"^2*")"),
+    y = expression("Volume (mL)"),
+    color = "Species", shape = "Dataset", fill = "Type"
+  ) +
+  my_plot_theme
+
+# --- 1. legend גדול מימין (רק פעם אחת, לא בכל איור!) ---
+legend <- cowplot::get_legend(
+  DeltaO2_vs_SumOSA_plot + theme(
+    legend.position = "right",
+    legend.text = element_text(size = 18, face = "italic"),
+    legend.title = element_text(size = 20),
+    legend.key.size = unit(1.2, "cm"),
+    legend.spacing.y = unit(0.1, "cm"),
+    legend.margin = margin(0, 0, 0, 0),
+    legend.box.margin = margin(0, 0, 0, 0)
+  )
+)
+
+# --- 2. מסדרים: 3 איורים עליונה + 3 תחתונה (או 5 בלבד) ---
+main_panel <- (
+  DeltaO2_vs_SumOSA_plot + PR_vs_SumOSA_plot + Rind_vs_SumOSA_plot
+) /
+(
+  PRsumOSA_vs_SumOSA_plot + RsumOSA_vs_SumOSA_plot + sumOSA_vs_Volume_plot
+)
+
+# הוספת אותיות (A–F)
+main_panel <- main_panel + patchwork::plot_annotation(
+  tag_levels = "A",
+  theme = theme(plot.tag = element_text(size = 22, face = "bold"))
+)
+
+# שילוב עם legend בצד ימין (רוחב רחב!)
+Osculum_6panel_patchwork <- main_panel | patchwork::wrap_elements(legend) +
+  patchwork::plot_layout(widths = c(2.8, 0.38))
+
+# --- 3. הצגה ---
+Osculum_6panel_patchwork
+
+# --- 4. שמירה (SVG לוקטור/PNG לתמונה) ---
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/Osculum_6panel_patchwork.svg",
+  plot = Osculum_6panel_patchwork,
+  width = 28, height = 10, dpi = 300
+)
+# אפשר לשמור גם ב־PNG
+# ggsave("...", plot = Osculum_6panel_patchwork, width = 28, height = 10, dpi = 300)
+
+
+```
+# בדיקה לקווי מגמה HMA LMA  
+```{r, fig.width=12,fig.height=8}
+hma_lma_cols <- c(HMA = "#D55E00", LMA = "#0072B2")
+
+plot_power_law_by_group <- function(df, xvar, yvar, groupvar, xlab, ylab) {
+  library(dplyr)
+  library(ggplot2)
+
+  dat <- df %>%
+    filter(!is.na(.data[[xvar]]), !is.na(.data[[yvar]]),
+           .data[[xvar]] > 0, .data[[yvar]] > 0) %>%
+    mutate(.grp = .data[[groupvar]])
+
+  fits <- dat %>%
+    group_by(.grp) %>%
+    summarise(
+      n = n(),
+      a = { mdl <- lm(as.formula(paste0("log(", yvar, ") ~ log(", xvar, ")")), data = cur_data());
+            exp(coef(mdl)[1]) },
+      b = { mdl <- lm(as.formula(paste0("log(", yvar, ") ~ log(", xvar, ")")), data = cur_data());
+            unname(coef(mdl)[2]) },
+      r2 = { mdl <- lm(as.formula(paste0("log(", yvar, ") ~ log(", xvar, ")")), data = cur_data());
+             summary(mdl)$r.squared },
+      pval = { mdl <- lm(as.formula(paste0("log(", yvar, ") ~ log(", xvar, ")")), data = cur_data());
+               summary(mdl)$coefficients[2, "Pr(>|t|)"] },
+      x_min = min(.data[[xvar]], na.rm = TRUE),
+      x_max = max(.data[[xvar]], na.rm = TRUE),
+      y_max = max(.data[[yvar]], na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  fits_sig <- fits %>% filter(!is.na(pval), pval < 0.05, n >= 3)
+
+  trend_df <- NULL
+  if (nrow(fits_sig) > 0) {
+    trend_df <- fits_sig %>%
+      rowwise() %>%
+      do({
+        xs <- seq(.$x_min, .$x_max, length.out = 100)
+        ys <- .$a * xs ^ .$b
+        tibble(.grp = .$`.grp`, x = xs, y = ys)
+      }) %>% ungroup()
+  }
+
+  eq_df <- NULL
+  if (nrow(fits_sig) > 0) {
+    y_frac <- seq(0.85, 0.55, length.out = nrow(fits_sig))
+    eq_df <- fits_sig %>%
+      mutate(
+        label = paste0(
+          "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+          "*','~~italic(R)^2 == ", signif(r2, 3)
+        ),
+        x_pos = x_min * 1.35,
+        y_pos = y_max * y_frac
+      )
+  }
+
+  p <- ggplot(dat, aes_string(
+      x = xvar, y = yvar,
+      color = groupvar, shape = "Dataset"
+    )) +
+    geom_point(size = 5, stroke = 1.2) +
+    scale_color_manual(values = hma_lma_cols, name = groupvar) +
+    scale_shape_manual(values = shape_values_updated) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = xlab, y = ylab, color = "Type", shape = "Dataset") +
+    my_plot_theme
+
+  if (!is.null(trend_df)) {
+    p <- p +
+      geom_line(
+        data = trend_df,
+        aes(x = x, y = y, color = .grp),
+        inherit.aes = FALSE,
+        linetype = "dashed", linewidth = 1
+      )
+  }
+
+  if (!is.null(eq_df)) {
+    p <- p +
+      geom_text(
+        data = eq_df,
+        aes(x = x_pos, y = y_pos, label = label, color = .grp),
+        inherit.aes = FALSE,
+        parse = TRUE, hjust = 0, vjust = 0, size = 5
+      )
+  }
+
+  return(p)
+}
+
+# הרצה:
+PRsumOSA_vs_SumOSA_byHMA_plot <- plot_power_law_by_group(
+  df       = Osculum_Ind_summary_table,
+  xvar     = "avg_osculum_area_mm2_sum",
+  yvar     = "PRsumOSA",
+  groupvar = "HMA_LMA",
+  xlab     = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab     = expression(PR[sum(OSA)] ~ "(" * "L hr"^{-1}~mm^{-2} * ")")
+)
+
+PRsumOSA_vs_SumOSA_byHMA_plot
+
+
+# שמירה (מידות מתונות כדי שהכל יהיה קריא)
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/PRsumOSA_vs_SumOSA_byHMA_plot.png",
+  plot = PRsumOSA_vs_SumOSA_byHMA_plot,
+  width = 12, height = 8, dpi = 300, bg = "white"
+)
+
+
+# === OFR ~ Osculum area, עם קווי מגמה נפרדים ל-HMA/LMA ===
+OFR_vs_OsculumArea_byHMA_plot <- plot_power_law_by_group(
+  df       = Osculum_Ind_summary_table,
+  xvar     = "avg_osculum_area_mm2",
+  yvar     = "avg_OFR_L_hr",
+  groupvar = "HMA_LMA",
+  xlab     = expression("Osculum area (mm"^2*")"),
+  ylab     = expression("OFR (L hr"^{-1}*")")
+)
+
+# צפייה
+OFR_vs_OsculumArea_byHMA_plot
+
+# שמירה
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/OFR_vs_OsculumArea_byHMA_plot.png",
+  plot = OFR_vs_OsculumArea_byHMA_plot,
+  width = 12, height = 8, dpi = 300, bg = "white"
+)
+
+
+```
+
+#Panel- SizeClass_Ind_summary_table
+```{r, fig.width=28,fig.height=10}
+
+library(patchwork)
+# --- Panel - SizeClass_Ind_summary_table ---
+
+# הגדרת צבעים לכל מין
+species_colors <-  c(
+  "C.cyathophora"   = "#BAD6D3",
+  "C.siphonella"    = "#939ECC",
+  "D.erythraeanus"  = "#A65628",
+  "N.rowi"          = "#377EB8",
+  "S.clavatus"      = "#EEB422",
+  "T.swinhoei"      = "#8B2323",
+  "A.oroides"       = "#FF7F00",
+  "C.reniformis"    = "#BD9D80",
+  "D.avara"         = "#A680BD",
+  "M.fistulifera"   = "#E41A1C"
+)
+
+# צורות תומכות fill (21-25)
+shape_values_updated <- c(
+  "Red_Sea_2018_2019"    = 21,  # עיגול
+  "NW_Mediterranean"     = 24,  # משולש
+  "Red_Sea_2024"         = 22   # ריבוע
+)
+
+# פיל: HMA מלא בצבע המין, LMA ריק (לבן)
+SizeClass_Ind_summary_table$fill_species <- ifelse(
+  SizeClass_Ind_summary_table$HMA_LMA == "HMA",
+  species_colors[SizeClass_Ind_summary_table$Species],
+  "white"
+)
+
+# Theme אחיד
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  panel.grid = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  axis.line = element_line(color = "black"),
+  axis.title = element_text(size = 25),
+  axis.text = element_text(size = 20),
+  legend.text = element_text(size = 13, face = "italic"),
+  legend.title = element_text(size = 14),
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  legend.position = "right"
+)
+
+# עמודות מחושבות מראש
+SizeClass_Ind_summary_table <- SizeClass_Ind_summary_table %>%
+  mutate(
+    PRV = avg_PR_L_hr / avg_Volume_ml,
+    RV  = avg_Rind_umol_hr / avg_Volume_ml
+  )
+
+# פונקציה ליצירת גרף log-log עם fill+trendline
+plot_power_law <- function(df, xvar, yvar, xlab, ylab) {
+  data_valid <- df %>%
+    filter(!is.na(.data[[xvar]]), !is.na(.data[[yvar]]), .data[[xvar]] > 0, .data[[yvar]] > 0)
+  formula_str <- paste0("log(", yvar, ") ~ log(", xvar, ")")
+  model <- lm(as.formula(formula_str), data = data_valid)
+  sm <- summary(model)
+  a <- exp(coef(model)[1])
+  b <- coef(model)[2]
+  r2 <- sm$r.squared
+  pval <- sm$coefficients[2, "Pr(>|t|)"]
+  trend_line <- NULL
+  eq_text <- NULL
+  if (pval < 0.05) {
+    x_vals <- seq(min(data_valid[[xvar]]), max(data_valid[[xvar]]), length.out = 100)
+    y_vals <- a * x_vals^b
+    trend_line <- data.frame(x = x_vals, y = y_vals)
+    eq_text <- paste0(
+      "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+      "*','~~italic(R)^2 == ", signif(r2, 3)
+    )
+  }
+  p <- ggplot(df, aes_string(
+      x = xvar, y = yvar,
+      color = "Species", shape = "Dataset", fill = "fill_species"
+    )) +
+    geom_point(size = 5, stroke = 1.5) +
+    scale_color_manual(values = species_colors) +
+    scale_shape_manual(values = shape_values_updated) +
+    scale_fill_identity() +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = xlab, y = ylab, color = "Species", shape = "Dataset", fill = "Type") +
+    my_plot_theme
+
+  if (!is.null(trend_line)) {
+    p <- p +
+      geom_line(data = trend_line, aes(x = x, y = y),
+                inherit.aes = FALSE, color = "black", linetype = "dashed", size = 1) +
+      annotate("text",
+        x = min(data_valid[[xvar]]) * 1.4,
+        y = max(data_valid[[yvar]]) * 0.65,
+        label = eq_text, parse = TRUE,
+        hjust = 0, vjust = -0.7, size = 5
+      )
+  }
+  return(p)
+}
+
+# --- 6 איורים בבת אחת ---
+DeltaO2_vs_Volume_plot <- plot_power_law(
+  df    = SizeClass_Ind_summary_table,
+  xvar  = "avg_Volume_ml",
+  yvar  = "avg_Delta_O2_umol_L",
+  xlab  = expression("Volume (mL)"),
+  ylab  = expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")")
+)
+PR_vs_Volume_plot <- plot_power_law(
+  df    = SizeClass_Ind_summary_table,
+  xvar  = "avg_Volume_ml",
+  yvar  = "avg_PR_L_hr",
+  xlab  = expression("Volume (mL)"),
+  ylab  = expression("PR (L hr"^{-1}*")")
+)
+Rind_vs_Volume_plot <- plot_power_law(
+  df    = SizeClass_Ind_summary_table,
+  xvar  = "avg_Volume_ml",
+  yvar  = "avg_Rind_umol_hr",
+  xlab  = expression("Volume (mL)"),
+  ylab  = expression("R"["ind"]~ " ("*mu*"mol hr"^{-1}*")")
+)
+RV_vs_Volume_plot <- plot_power_law(
+  df    = SizeClass_Ind_summary_table,
+  xvar  = "avg_Volume_ml",
+  yvar  = "RV",
+  xlab  = expression("Volume (mL)"),
+  ylab  = expression(R[V] ~ "(" * mu * "mol hr"^{-1}~mL[sponge]^{-1} * ")")
+)
+PRV_vs_Volume_plot <- plot_power_law(
+  df    = SizeClass_Ind_summary_table,
+  xvar  = "avg_Volume_ml",
+  yvar  = "PRV",
+  xlab  = expression("Volume (mL)"),
+  ylab  = expression(PR[V] ~ "(" * "L hr"^{-1} ~ mL[sponge]^{-1} * ")")
+)
+SumOSA_vs_Volume_plot <- plot_power_law(
+  df    = SizeClass_Ind_summary_table,
+  xvar  = "avg_Volume_ml",
+  yvar  = "avg_osculum_area_mm2_sum",
+  xlab  = expression("Volume (mL)"),
+  ylab  = expression(Sigma~"Osculum area (mm"^2*")")
+)
+
+# --- איור נוסף: PRV מול DeltaO2 ---
+PRV_vs_DeltaO2_plot <- plot_power_law(
+  df    = SizeClass_Ind_summary_table,
+  xvar  = "PRV",
+  yvar  = "avg_Delta_O2_umol_L",
+  xlab  = expression(PR[V] ~ "(" * "L hr"^{-1} ~ mL[sponge]^{-1} * ")"),
+  ylab  = expression(Delta*O[2]~ "(" * mu * "mol L"^{-1} * ")")
+)
+
+# נסתיר אגדה כדי לשמור אחידות
+p7 <- PRV_vs_DeltaO2_plot + theme(legend.position = "none")
+
+
+# הגדרות...
+# (ההגדרות של הצבעים, shapes, theme, והפונקציות נותרות כמו בקוד שלך)
+
+
+# 1) נסתיר אגדה בכל גרף יחיד כדי שלא ישוכפל
+p1 <- DeltaO2_vs_Volume_plot + theme(legend.position = "none")
+p2 <- PR_vs_Volume_plot      + theme(legend.position = "none")
+p3 <- Rind_vs_Volume_plot    + theme(legend.position = "none")
+p4 <- PRV_vs_Volume_plot     + theme(legend.position = "none")
+p5 <- RV_vs_Volume_plot      + theme(legend.position = "none")
+p6 <- SumOSA_vs_Volume_plot  + theme(legend.position = "none")
+
+# 2) נוציא אגדה אחת קטנה מאחד הגרפים (עם הגדלים מצומצמים)
+legend_compact <- cowplot::get_legend(
+  DeltaO2_vs_Volume_plot +
+    theme(
+      legend.position = "right",
+      legend.text  = element_text(size = 9),
+      legend.title = element_text(size = 10),
+      legend.key.size = unit(0.35, "cm"),
+      legend.spacing.y = unit(0.05, "cm"),
+      legend.background = element_blank()
+    ) +
+    guides(
+      color = guide_legend(ncol = 1, override.aes = list(size = 3)),
+      shape = guide_legend(ncol = 1)
+    )
+)
+
+# 3) נסדר 3x2 פאנלים גדולים, אגדה מימין דקה
+main_panel <- patchwork::wrap_plots(p1, p2, p3, p4, p5, p6, ncol = 3) +
+  patchwork::plot_annotation(tag_levels = "A")
+
+main_panel <- main_panel + ggplot2::theme(
+  plot.tag = element_text(size = 16, face = "bold"),
+  axis.title = element_text(size = 12),
+  axis.text  = element_text(size = 10)
+)
+
+final_panel <- main_panel | patchwork::wrap_elements(legend_compact) +
+  plot_layout(widths = c(3.2, 0.8))  # שמאל רחב לגרפים, ימין צר לאגדה
+
+# תצוגה
+final_panel
+
+# שמירה (מידות מתונות כדי שהכל יהיה קריא)
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/SizeClass_6panel_patchwork.svg",
+  plot = final_panel,
+  width = 16, height = 10, dpi = 300, bg = "white"
+)
+
+# שמירה (מידות מתונות כדי שהכל יהיה קריא)
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/DeltaO2_vs_Volume_plot.png",
+  plot = DeltaO2_vs_Volume_plot,
+  width = 12, height = 8, dpi = 300, bg = "white"
+)
+
+
+
+```
+
+##HMA LMA plot
+```{r, fig.height=7, fig.width=10}
+
+
+# צבעים ל-HMA/LMA
+hma_lma_cols <- c(HMA = "#D55E00", LMA = "#0072B2")
+
+# המדדים לפאנלים
+metrics <- c(
+  "avg_OFR_L_hr",
+  "avg_Delta_O2_umol_L",
+  "avg_PR_L_hr",
+  "avg_Rind_umol_hr",
+  "avg_RV_umol_hr_ml"
+)
+
+# תוויות מתמטיות לפאנלים (יופיעו בצד שמאל במקום ציר Y)
+metric_labels <- c(
+  avg_OFR_L_hr        = "OFR~'(L~hr'^{-1}*')'",
+  avg_Delta_O2_umol_L = "Delta*O[2]~'('*mu*'mol~L'^{-1}*')'",
+  avg_PR_L_hr         = "PR~'(L~hr'^{-1}*')'",
+  avg_Rind_umol_hr    = "R[ind]~'('*mu*'mol~hr'^{-1}*')'",
+  avg_RV_umol_hr_ml   = "R[V]~'('*mu*'mol~hr'^{-1}~mL[sponge]^{-1}*')'"
+)
+
+# הכנת נתוני long + סדרי רמות
+df_long <- SizeClass_Ind_summary_table %>%
+  dplyr::select(HMA_LMA, dplyr::all_of(metrics)) %>%
+  tidyr::pivot_longer(cols = dplyr::all_of(metrics),
+                      names_to = "metric", values_to = "value") %>%
+  mutate(
+    HMA_LMA = factor(HMA_LMA, levels = c("LMA","HMA")),    # סדר קבוע על הציר
+    metric  = factor(metric, levels = metrics)              # סדר הפאצטים
+  )
+
+# --- מבחני t לכל פרמטר + טבלת סיכום ---
+ttest_results <- df_long %>%
+  group_by(metric) %>%
+  summarise(
+    n_HMA   = sum(HMA_LMA == "HMA" & !is.na(value)),
+    n_LMA   = sum(HMA_LMA == "LMA" & !is.na(value)),
+    mean_HMA= mean(value[HMA_LMA == "HMA"], na.rm = TRUE),
+    mean_LMA= mean(value[HMA_LMA == "LMA"], na.rm = TRUE),
+    p_value = tryCatch(t.test(value ~ HMA_LMA)$p.value, error = function(e) NA_real_),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    signif = case_when(
+      is.na(p_value)        ~ NA_character_,
+      p_value < 0.001       ~ "***",
+      p_value < 0.01        ~ "**",
+      p_value < 0.05        ~ "*",
+      TRUE                  ~ "ns"
+    )
+  )
+
+# נקודת אנוטציה לכוכבית (במרכז בין LMA/HMA, מעט מעל המקסימום)
+annot_pos <- df_long %>%
+  group_by(metric) %>%
+  summarise(y_pos = max(value, na.rm = TRUE) * 1.05, .groups = "drop")
+
+annot_df <- ttest_results %>%
+  filter(!is.na(signif) & signif %in% c("*","**","***")) %>%  # רק מובהק
+  left_join(annot_pos, by = "metric")
+
+# --- איור קופסאות עם ממוצע X וכוכבית מובהקות ---
+# איור קופסאות עם ממוצע X וכוכבית מובהקות בתוך האיור
+HMA_LMA_boxplot <- ggplot(df_long, aes(x = HMA_LMA, y = value, fill = HMA_LMA)) +
+  geom_boxplot(width = 0.65, alpha = 0.9, outlier.shape = NA) +
+  geom_jitter(aes(color = HMA_LMA), width = 0.15, alpha = 0.5, size = 1.8) +
+  # ממוצע כ-X
+  stat_summary(aes(color = HMA_LMA),
+               fun = mean, geom = "point",
+               shape = 4, size = 3.2, stroke = 1.1) +
+  # פאצט אנכי עם שמות הפרמטרים בצד שמאל
+  facet_grid(rows = vars(metric), scales = "free_y", switch = "y",
+             labeller = labeller(metric = as_labeller(metric_labels, label_parsed))) +
+  # כוכביות בתוך האיור
+  geom_text(data = annot_df,
+          aes(x = 1.5, y = y_pos, label = signif),
+          inherit.aes = FALSE, size = 5.2, vjust = 1)+
+  scale_fill_manual(values = hma_lma_cols, guide = "none") +
+  scale_color_manual(values = hma_lma_cols, guide = "none") +
+  coord_cartesian(clip = "off") +
+  labs(x = NULL, y = NULL) +
+  # שימוש ב-theme האישי שלך
+  my_plot_theme +
+  theme(
+    strip.placement = "outside",
+    strip.background = element_blank(),
+    strip.text.y.left = element_text(size = 14, face = "bold"),
+    panel.spacing.y = unit(0.8, "lines"),
+    plot.margin = margin(5.5, 15, 5.5, 5.5, "pt")
+  )
+
+HMA_LMA_boxplot
+
+
+# שמירה
+ggsave(
+  "HMA_LMA_boxplot.png",
+  plot = HMA_LMA_boxplot,
+  width = 10, height = 18, dpi = 300
+)
+
+
+# לצפייה בתוצאות המבחנים:
+ttest_results
+
+
+```
+
+
+
+
+# Osculum_summary_table 
+```{r, fig.width=10,fig.height=7}
+
+Osc_summary_df <- as.data.frame(all_sponge_data$combined$Osc_summary) 
+
+
+# מיפוי בין Species ל-HMA/LMA
+hma_lma_map <- c(
+  "A.oroides"      = "HMA",
+  "C.reniformis"   = "HMA",
+  "D.avara"        = "LMA",
+  "C.cyathophora"  = "LMA",
+  "C.siphonella"   = "LMA",
+  "D.erythraeanus" = "HMA",
+  "M.fistulifera"  = "LMA",
+  "N.rowi"         = "LMA",
+  "S.clavatus"     = "HMA",
+  "T.swinhoei"     = "HMA"
+)
+
+Osc_summary_df <- Osc_summary_df %>%
+  mutate(HMA_LMA = dplyr::recode(Species, !!!hma_lma_map))
+
+# הנחת יסוד: Osc_summary_df כבר כוללת עמודה HMA_LMA עם הערכים הנכונים.
+
+# --- 1. Agelas oroides לפי קטגוריית גודל אוסקולה ---
+aoroides_groups <- Osc_summary_df %>%
+  filter(Species == "A.oroides", !is.na(Osculum_sizeClass)) %>%
+  group_by(Dataset, Species, Group = Osculum_sizeClass, HMA_LMA) %>%
+  summarise(
+    n_oscula             = n(),
+    avg_OFR_L_hr         = mean(OFR_L_hr_mean, na.rm = TRUE),                 
+    avg_Delta_O2_umol_L  = mean(Delta_O2_umol_L_mean, na.rm = TRUE),         
+    avg_R_Osc_umol_hr    = mean(R_Osc_umol_hr, na.rm = TRUE),                
+    avg_osculum_area_mm2 = mean(osculum_area_mm2, na.rm = TRUE),             
+    avg_volume_ml        = mean(Volume_ml, na.rm = TRUE),                    
+    Group_type           = "Osculum_sizeClass",
+    .groups = 'drop'
+  )
+
+# --- 2. שאר המינים Red Sea 2018/2019 – כל שורה אוסקולה בודדת ---
+red_sea_2018_2019 <- Osc_summary_df %>%
+  filter(Dataset == "Red_Sea_2018_2019", Species != "A.oroides") %>%
+  mutate(
+    Group                = paste(Species, Oscula, sep = "_"),
+    Group_type           = "Osculum",
+    n_oscula             = 1, # כל שורה אוסקולה אחת
+    avg_OFR_L_hr         = OFR_L_hr_mean,
+    avg_Delta_O2_umol_L  = Delta_O2_umol_L_mean,
+    avg_R_Osc_umol_hr    = R_Osc_umol_hr,
+    avg_osculum_area_mm2 = osculum_area_mm2,
+    avg_volume_ml        = Volume_ml
+  ) %>%
+   dplyr::select(
+    Dataset, Species, Group, Group_type, n_oscula,
+    avg_OFR_L_hr, avg_Delta_O2_umol_L, avg_R_Osc_umol_hr,
+    avg_osculum_area_mm2, avg_volume_ml, HMA_LMA
+  )
+
+# --- 3. Red_Sea_2024 – קיבוץ לפי מין ---
+red_sea_2024 <- Osc_summary_df %>%
+  filter(Dataset == "Red_Sea_2024") %>%
+  group_by(Dataset, Species, Group = Species, HMA_LMA) %>%
+  summarise(
+    n_oscula             = n(),
+    avg_OFR_L_hr         = mean(OFR_L_hr_mean, na.rm = TRUE),
+    avg_Delta_O2_umol_L  = mean(Delta_O2_umol_L_mean, na.rm = TRUE),
+    avg_R_Osc_umol_hr    = mean(R_Osc_umol_hr, na.rm = TRUE),
+    avg_osculum_area_mm2 = mean(osculum_area_mm2, na.rm = TRUE),
+    avg_volume_ml        = mean(Volume_ml, na.rm = TRUE),
+    Group_type           = "Species",
+    .groups = 'drop'
+  )
+
+# --- 4. איחוד לטבלה אחת ---
+Osculum_summary_table <- bind_rows(aoroides_groups, red_sea_2018_2019, red_sea_2024)
+
+
+
+```
+
+## Panel- Osculum_summary_table 
+```{r, fig.width=28, fig.height=10}
+
+# --- הגדרת צבעים, צורות ו־theme ---
+species_colors <-  c(
+  "C.cyathophora"   = "#BAD6D3",
+  "C.siphonella"    = "#939ECC",
+  "D.erythraeanus"  = "#A65628",
+  "N.rowi"          = "#377EB8",
+  "S.clavatus"      = "#EEB422",
+  "T.swinhoei"      = "#8B2323",
+  "A.oroides"       = "#FF7F00",
+  "C.reniformis"    = "#BD9D80",
+  "D.avara"         = "#A680BD",
+  "M.fistulifera"   = "#E41A1C"
+)
+shape_values_updated <- c(
+  "Red_Sea_2018_2019"    = 21, # עיגול
+  "NW_Mediterranean"     = 24, # משולש
+  "Red_Sea_2024"         = 22  # ריבוע
+)
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  panel.grid = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  axis.line = element_line(color = "black"),
+  axis.title = element_text(size = 25),
+  axis.text = element_text(size = 20),
+  legend.text = element_text(size = 13, face = "italic"),
+  legend.title = element_text(size = 14),
+  legend.key = element_blank(),
+  legend.background = element_blank(),
+  legend.position = "right"
+)
+
+# פיל: HMA מלא בצבע המין, LMA ריק (לבן)
+Osculum_summary_table$fill_species <- ifelse(
+  Osculum_summary_table$HMA_LMA == "HMA",
+  species_colors[Osculum_summary_table$Species],
+  "white"
+)
+
+# פונקציה ליצירת גרף log-log עם קו מגמה, משוואה ו־R² (אם p < 0.05)
+plot_power_law <- function(df, xvar, yvar, xlab, ylab) {
+  data_valid <- df %>%
+    filter(!is.na(.data[[xvar]]), !is.na(.data[[yvar]]), .data[[xvar]] > 0, .data[[yvar]] > 0)
+  formula_str <- paste0("log(", yvar, ") ~ log(", xvar, ")")
+  model <- lm(as.formula(formula_str), data = data_valid)
+  sm <- summary(model)
+  a <- exp(coef(model)[1])
+  b <- coef(model)[2]
+  r2 <- sm$r.squared
+  pval <- sm$coefficients[2, "Pr(>|t|)"]
+  trend_line <- NULL
+  eq_text <- NULL
+  if (!is.na(pval) && pval < 0.05 && b != 0) {
+    x_vals <- seq(min(data_valid[[xvar]]), max(data_valid[[xvar]]), length.out = 100)
+    y_vals <- a * x_vals^b
+    trend_line <- data.frame(x = x_vals, y = y_vals)
+    eq_text <- paste0(
+      "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+      "*','~~italic(R)^2 == ", signif(r2, 3)
+    )
+  }
+  p <- ggplot(df, aes(
+      x = .data[[xvar]],
+      y = .data[[yvar]],
+      color = Species,
+      shape = Dataset,
+      fill  = fill_species
+    )) +
+    geom_point(size = 5, stroke = 1.5) +
+    scale_color_manual(values = species_colors) +
+    scale_shape_manual(values = shape_values_updated) +
+    scale_fill_identity() +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(
+      x = xlab, y = ylab,
+      color = "Species", shape = "Dataset", fill = "Type"
+    ) +
+    my_plot_theme
+
+  if (!is.null(trend_line)) {
+    p <- p +
+      geom_line(data = trend_line, aes(x = x, y = y),
+                inherit.aes = FALSE, color = "black", linetype = "dashed", size = 1) +
+      annotate("text",
+        x = min(data_valid[[xvar]]) * 1.4,
+        y = max(data_valid[[yvar]]) * 0.65,
+        label = eq_text, parse = TRUE,
+        hjust = 0, vjust = -0.7, size = 5
+      )
+  }
+  return(p)
+}
+
+# --- יצירת עמודה Rosc ---
+Osculum_summary_table$Rosc <- Osculum_summary_table$avg_Delta_O2_umol_L * Osculum_summary_table$avg_OFR_L_hr
+
+# --- יצירת האיורים עם קו מגמה/משוואה ---
+DeltaO2_vs_OsculumArea_plot <- plot_power_law(
+  Osculum_summary_table,
+  "avg_osculum_area_mm2",
+  "avg_Delta_O2_umol_L",
+  expression("Osculum area (mm"^2*")"),
+  expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")")
+)
+OFR_vs_OsculumArea_plot <- plot_power_law(
+  Osculum_summary_table,
+  "avg_osculum_area_mm2",
+  "avg_OFR_L_hr",
+  expression("Osculum area (mm"^2*")"),
+  expression("OFR (L hr"^{-1}*")")
+)
+Rosc_vs_OsculumArea_plot <- plot_power_law(
+  Osculum_summary_table,
+  "avg_osculum_area_mm2",
+  "Rosc",
+  expression("Osculum area (mm"^2*")"),
+  expression("R"[osc]~ "("*mu*"mol hr"^{-1}*")")
+)
+Volume_vs_OsculumArea_plot <- plot_power_law(
+  Osculum_summary_table,
+  "avg_volume_ml",
+  "avg_osculum_area_mm2",
+  expression("Volume (mL)"),
+  expression("Osculum area (mm"^2*")")
+)
+
+# --- הכנת legend גדול ---
+legend <- get_legend(
+  DeltaO2_vs_OsculumArea_plot + theme(
+    legend.position = "right",
+    legend.text = element_text(size = 18, face = "italic"),
+    legend.title = element_text(size = 20),
+    legend.key.size = unit(1.1, "cm"),
+    legend.spacing.y = unit(0.07, "cm"),
+    legend.margin = margin(0, 0, 0, 0),
+    legend.box.margin = margin(0, 0, 0, 0)
+  )
+)
+
+# --- פאנל מסודר 2x2 עם legend ---
+main_panel <- (
+  DeltaO2_vs_OsculumArea_plot + OFR_vs_OsculumArea_plot
+) /
+(
+  Rosc_vs_OsculumArea_plot + Volume_vs_OsculumArea_plot
+)
+
+main_panel <- main_panel + patchwork::plot_annotation(
+  tag_levels = "A",
+  theme = theme(plot.tag = element_text(size = 22, face = "bold"))
+)
+
+Osculum_4panel_patchwork <- main_panel | patchwork::wrap_elements(legend) +
+  plot_layout(widths = c(2.4, 0.39))
+
+# הצגה
+Osculum_4panel_patchwork
+
+# שמירה
+ggsave(
+  "OsculumArea_4panel_patchwork.png",
+  plot = Osculum_4panel_patchwork,
+  width = 18, height = 10, dpi = 300
+)
+
+```
+
+# איור חדש של קצבי שאיבה בין מיני 
+```{r, fig.width=19,fig.height=25}
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library(patchwork)
+library(grid)
+
+# Theme אחיד למקרא ולתיוג הפאנלים
+legend_theme <- theme(
+  legend.position   = "bottom",
+  legend.box        = "horizontal",
+  legend.text       = element_text(size = 12, face = "italic"),
+  legend.title      = element_text(size = 13),
+  legend.key.size   = unit(0.1, "cm"),
+  legend.spacing.x  = unit(0.1, "cm"),
+  legend.spacing.y  = unit(0.1, "cm"),
+  legend.background = element_blank(),
+  plot.background   = element_rect(fill = "white", color = NA),
+  plot.tag          = element_text(size = 16, face = "bold")
+)
+
+# מוסיפים את אותו theme לכל גרף
+# שימי לב: לא מסתירים מקרא, כדי ש-patchwork יוכל לאסוף אותו
+pA <- OFR_vs_OsculumArea_plot + legend_theme
+pB <- PR_vs_SumOSA_plot       + legend_theme
+pC <- PR_vs_Volume_plot       + legend_theme
+pD <- PRV_vs_Volume_plot      + legend_theme
+
+# בניית הפאנל 2x2 עם מקרא אחד משותף למטה
+panel_with_legend_bottom <-
+  ((pA | pB) /
+   (pC | pD)) +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(guides = "collect")
+
+# תצוגה
+panel_with_legend_bottom
+
+# שמירה
+ggsave(
+  filename = "panel_2x2_with_legend_bottom.png",
+  plot     = panel_with_legend_bottom,
+  width    = 14,
+  height   = 14,
+  dpi      = 300,
+  bg       = "white"
+)
+```
+
+
+
+# Panel- כללי לכל הבין מיני
+```{r, fig.width=19,fig.height=25}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(grid)
+
+# 1) פונקציה שמכווצת כל גרף לפאנל
+compactify_plot <- function(p, drop_text_ann = TRUE) {
+  if (drop_text_ann) {
+    # מסיר שכבות טקסט (לרוב משוואות / annotate)
+    p$layers <- p$layers[
+      !vapply(
+        p$layers,
+        function(ly) inherits(ly$geom, "GeomText"),
+        logical(1)
+      )
+    ]
+  }
+
+  p +
+    labs(x = NULL, y = NULL) +
+    theme(
+      legend.position = "none",
+      axis.title = element_text(size = 10),
+      axis.text  = element_text(size = 8),
+      plot.title = element_text(size = 11, face = "bold"),
+      plot.margin = margin(4, 4, 4, 4)
+    )
+}
+
+# 2) שמות הגרפים
+plot_names <- c(
+  "DeltaO2_vs_OsculumArea_plot", "OFR_vs_OsculumArea_plot", "Rosc_vs_OsculumArea_plot",
+  "DeltaO2_vs_SumOSA_plot", "PR_vs_SumOSA_plot", "Rind_vs_SumOSA_plot",
+  "PRsumOSA_vs_SumOSA_plot", "RsumOSA_vs_SumOSA_plot",
+  "DeltaO2_vs_Volume_plot", "PR_vs_Volume_plot", "Rind_vs_Volume_plot",
+  "PRV_vs_Volume_plot", "RV_vs_Volume_plot"
+)
+
+# 3) לוקחים רק מה שקיים ובאמת ggplot
+is_plot_object <- function(x) inherits(x, c("gg", "ggplot"))
+
+available_names <- plot_names[
+  sapply(plot_names, function(nm) {
+    exists(nm, inherits = TRUE) && is_plot_object(get(nm, inherits = TRUE))
+  })
+]
+
+plots_list <- lapply(available_names, function(nm) get(nm, inherits = TRUE))
+
+if (length(plots_list) == 0) {
+  stop("לא נמצאו אובייקטים של גרפים מהשמות שסופקו.")
+}
+
+# 4) מקטינים, סוגרים מקרא ומסירים שכבות טקסט
+plots_list_small <- lapply(plots_list, compactify_plot)
+
+# 5) בונים את הפאנל
+panel <- wrap_plots(
+  plots_list_small,
+  ncol = 3,
+  guides = "collect",
+  byrow = TRUE
+) +
+  plot_annotation(tag_levels = "A") +
+  theme(
+    plot.tag = element_text(face = "bold", size = 14),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+# 6) תצוגה
+panel
+
+# 7) שמירה
+rows <- ceiling(length(plots_list_small) / 3)
+
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/big_3col_panel_final.png",
+  plot     = panel,
+  width    = 16,
+  height   = max(9, rows * 5),
+  dpi      = 300,
+  bg       = "white"
+)
+
+```
+
+```{r, fig.width=19,fig.height=25}
+library(ggplot2)
+library(patchwork)
+
+# השמות שנרצה בפאנל
+needed <- c(
+  "PR_vs_Volume_plot", "PRV_vs_Volume_plot",
+  "OFR_vs_OsculumArea_plot", "PR_vs_SumOSA_plot"
+)
+
+# פונקציה שמחזירה את האיור אם קיים, מסירה מקרא;
+# ואם לא קיים – מחזירה spacer
+safe_plot <- function(name) {
+  if (exists(name, inherits = TRUE)) {
+    p <- get(name, inherits = TRUE)
+    if (inherits(p, c("gg", "ggplot"))) {
+      return(
+        p + theme(legend.position = "none")
+      )
+    }
+  }
+  patchwork::plot_spacer()
+}
+
+# בונים את 4 האיורים (ללא מקרא)
+pA <- safe_plot("PR_vs_Volume_plot")
+pB <- safe_plot("PRV_vs_Volume_plot")
+pC <- safe_plot("OFR_vs_OsculumArea_plot")
+pD <- safe_plot("PR_vs_SumOSA_plot")
+
+# פאנל 2x2, בלי מקרא בכלל
+final_panel_nolegend <-
+  ((pA | pB) /
+   (pC | pD)) +
+  plot_annotation(tag_levels = "A") +
+  theme(
+    plot.tag = element_text(size = 16, face = "bold"),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+# הצגה
+final_panel_nolegend
+
+# שמירה
+ggsave(
+  filename = "panel_PR_PRV_OFR_PRsumOSA_nolegend.png",
+  plot     = final_panel_nolegend,
+  width    = 14,
+  height   = 10,
+  dpi      = 300,
+  bg       = "white"
+)
+
+```
+
+# plot- osculum_Aoroides_df 
+```{r, fig.width=8,fig.height=7}
+
+NW_Ind_summary <- as.data.frame(all_sponge_data$NW_Mediterranean$NW_Ind_summary) 
+
+# סינון נתונים ל-A.oroides בלבד
+Aoroides_df <- NW_Ind_summary %>%
+  filter(Species == "A.oroides")
+
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  panel.grid = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  axis.line = element_line(color = "black"),
+  axis.title = element_text(size = 15),
+  axis.text = element_text(size = 12)
+)
+
+# 1. Delta O2 ~ sum(Osculum area)
+DeltaO2_vs_SumOSA_Aoroides_plot <- ggplot(Aoroides_df, aes(x = osculum_area_sum, y = Delta_O2_umol_L_mean_mean)) +
+  geom_point(size = 4, color = "#FF7F00", shape = 17) +
+  scale_x_log10() + scale_y_log10() +
+  labs(
+    x = expression(Sigma~"Osculum area (mm"^2*")"),
+    y = expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")")
+  ) + my_plot_theme
+
+# 2. PR_L_hr ~ sum(Osculum area)
+PR_vs_SumOSA_Aoroides_plot <- ggplot(Aoroides_df, aes(x = osculum_area_sum, y = PR_L_hr)) +
+  geom_point(size = 4, color = "#FF7F00", shape = 17) +
+  scale_x_log10() + scale_y_log10() +
+  labs(
+    x = expression(Sigma~"Osculum area (mm"^2*")"),
+    y = expression("PR (L hr"^{-1}*")")
+  ) + my_plot_theme
+
+# 3. Rind ~ sum(Osculum area)
+Rind_vs_SumOSA_Aoroides_plot <- ggplot(Aoroides_df, aes(x = osculum_area_sum, y = Rind_umol_hr)) +
+  geom_point(size = 4, color = "#FF7F00", shape = 17) +
+  scale_x_log10() + scale_y_log10() +
+  labs(
+    x = expression(Sigma~"Osculum area (mm"^2*")"),
+    y = expression("R"["ind"]~ "("*mu*"mol hr"^{-1}*")")
+  ) + my_plot_theme
+
+# 4. Rind / sum(Osculum area) ~ sum(Osculum area)
+RsumOSA_vs_SumOSA_Aoroides_plot <- ggplot(Aoroides_df, aes(x = osculum_area_sum, y = Rind_umol_hr / osculum_area_sum)) +
+  geom_point(size = 4, color = "#FF7F00", shape = 17) +
+  scale_x_log10() + scale_y_log10() +
+  labs(
+    x = expression(Sigma~"Osculum area (mm"^2*")"),
+    y = expression(R[sum(OSA)] ~ "(" * mu * "mol hr"^{-1}~mm^{-2}*")")
+  ) + my_plot_theme
+
+# 5. PR_L_hr/ sum(Osculum area) ~ sum(Osculum area)
+PRsumOSA_vs_SumOSA_Aoroides_plot <- ggplot(Aoroides_df, aes(x = osculum_area_sum, y = PR_L_hr / osculum_area_sum)) +
+  geom_point(size = 4, color = "#FF7F00", shape = 17) +
+  scale_x_log10() + scale_y_log10() +
+  labs(
+    x = expression(Sigma~"Osculum area (mm"^2*")"),
+    y = expression(PR[sum(OSA)] ~ "(" * "L hr"^{-1}~mm^{-2} * ")")
+  ) + my_plot_theme
+
+# 6.Volume_ml ~ sum(Osculum area)
+Volume_ml_vs_SumOSA_Aoroides_plot <- ggplot(Aoroides_df, aes(x = Volume_ml , y = osculum_area_sum)) +
+  geom_point(size = 4, color = "#FF7F00", shape = 17) +
+  scale_x_log10() + scale_y_log10() +
+  labs(
+    x = expression("Volume (mL)"),
+    y = expression(Sigma~"Osculum area (mm"^2*")"),
+  ) + my_plot_theme
+
+
+# שמירת איורים (לשנות path אם צריך)
+ggsave("DeltaO2_vs_SumOSA_Aoroides_plot.png", plot = DeltaO2_vs_SumOSA_Aoroides_plot, width = 8, height = 7, dpi = 300)
+ggsave("PR_vs_SumOSA_Aoroides_plot.png", plot = PR_vs_SumOSA_Aoroides_plot, width = 8, height = 7, dpi = 300)
+ggsave("Rind_vs_SumOSA_Aoroides_plot.png", plot = Rind_vs_SumOSA_Aoroides_plot, width = 8, height = 7, dpi = 300)
+ggsave("RsumOSA_vs_SumOSA_Aoroides_plot.png", plot = RsumOSA_vs_SumOSA_Aoroides_plot, width = 8, height = 7, dpi = 300)
+ggsave("PRsumOSA_vs_SumOSA_Aoroides_plot.png", plot = PRsumOSA_vs_SumOSA_Aoroides_plot, width = 8, height = 7, dpi = 300)
+ggsave("Volume_ml_vs_SumOSA_Aoroides_plot.png", plot = Volume_ml_vs_SumOSA_Aoroides_plot, width = 8, height = 7, dpi = 300)
+# צפייה ישירה ב-RStudio
+DeltaO2_vs_SumOSA_Aoroides_plot
+PR_vs_SumOSA_Aoroides_plot
+Rind_vs_SumOSA_Aoroides_plot
+RsumOSA_vs_SumOSA_Aoroides_plot
+PRsumOSA_vs_SumOSA_Aoroides_plot
+Volume_ml_vs_SumOSA_Aoroides_plot
+
+
+```
+
+# Panel- osculum_Aoroides_df 
+```{r, fig.width=22,fig.height=15}
+
+# --- פונקציה לציור איור log-log עם קו מגמה (למין אחד, צורה קבועה וצבע קבוע) ---
+plot_powerlaw_single <- function(df, xvar, yvar, xlab, ylab, color="#FF7F00", shape=17, fname=NULL) {
+  data_valid <- df %>%
+    filter(!is.na(.data[[xvar]]), !is.na(.data[[yvar]]), .data[[xvar]] > 0, .data[[yvar]] > 0)
+  formula_str <- paste0("log(", yvar, ") ~ log(", xvar, ")")
+  model <- lm(as.formula(formula_str), data = data_valid)
+  sm <- summary(model)
+  a <- exp(coef(model)[1])
+  b <- coef(model)[2]
+  r2 <- sm$r.squared
+  pval <- sm$coefficients[2, "Pr(>|t|)"]
+  trend_line <- NULL
+  eq_text <- NULL
+  if (!is.na(pval) && pval < 0.05) {
+    x_vals <- seq(min(data_valid[[xvar]]), max(data_valid[[xvar]]), length.out = 100)
+    y_vals <- a * x_vals^b
+    trend_line <- data.frame(x = x_vals, y = y_vals)
+    eq_text <- paste0(
+      "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+      "*','~~italic(R)^2 == ", signif(r2, 3)
+    )
+  }
+  p <- ggplot(df, aes_string(x = xvar, y = yvar)) +
+    geom_point(size = 4, color = color, shape = shape) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = xlab, y = ylab) +
+    my_plot_theme
+  if (!is.null(trend_line)) {
+    p <- p +
+      geom_line(data = trend_line, aes(x = x, y = y),
+                inherit.aes = FALSE, color = "black", linetype = "dashed", size = 1) +
+      annotate("text",
+               x = min(data_valid[[xvar]]) * 1.5,
+               y = max(data_valid[[yvar]]) * 0.75,
+               label = eq_text, parse = TRUE,
+               hjust = 0, vjust = -0.7, size = 5)
+  }
+  if(!is.null(fname)){
+    ggsave(fname, plot = p, width = 8, height = 7, dpi = 300)
+  }
+  return(p)
+}
+
+# 1. הוספת עמודות מחושבות
+Aoroides_df <- Aoroides_df %>%
+  mutate(
+    RsumOSA = Rind_umol_hr / osculum_area_sum,
+    PRsumOSA = PR_L_hr / osculum_area_sum
+  )
+
+# 2. ציור איורים עם שמות ייחודיים
+DeltaO2_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "Delta_O2_umol_L_mean_mean",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")"),
+  fname = "DeltaO2_vs_SumOSA_Aoroides_plot.png"
+)
+PR_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "PR_L_hr",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression("PR (L hr"^{-1}*")"),
+  fname = "PR_vs_SumOSA_Aoroides_plot.png"
+)
+Rind_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "Rind_umol_hr",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression("R"["ind"]~ "("*mu*"mol hr"^{-1}*")"),
+  fname = "Rind_vs_SumOSA_Aoroides_plot.png"
+)
+RsumOSA_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "RsumOSA",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression(R[sum(OSA)] ~ "(" * mu * "mol hr"^{-1}~mm^{-2}*")"),
+  fname = "RsumOSA_vs_SumOSA_Aoroides_plot.png"
+)
+PRsumOSA_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "PRsumOSA",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression(PR[sum(OSA)] ~ "(" * "L hr"^{-1}~mm^{-2} * ")"),
+  fname = "PRsumOSA_vs_SumOSA_Aoroides_plot.png"
+)
+
+# --- איור נוסף (לא בפאנל) ---
+Volume_ml_vs_SumOSA_Aoroides_plot <- ggplot(Aoroides_df, aes(x = Volume_ml, y = osculum_area_sum)) +
+  geom_point(size = 4, color = "#FF7F00", shape = 17) +
+  scale_x_log10() + scale_y_log10() +
+  labs(
+    x = expression("Volume (mL)"),
+    y = expression(Sigma~"Osculum area (mm"^2*")")
+  ) + my_plot_theme
+
+ggsave("Volume_ml_vs_SumOSA_Aoroides_plot.png", plot = Volume_ml_vs_SumOSA_Aoroides_plot, width = 8, height = 7, dpi = 300)
+
+# להצגה ב־RStudio:
+DeltaO2_vs_SumOSA_Aoroides_panel
+PR_vs_SumOSA_Aoroides_panel
+Rind_vs_SumOSA_Aoroides_panel
+RsumOSA_vs_SumOSA_Aoroides_panel
+PRsumOSA_vs_SumOSA_Aoroides_panel
+Volume_ml_vs_SumOSA_Aoroides_plot
+
+# יצירת גרסאות ללא legend
+DeltaO2_vs_SumOSA_Aoroides_panel_noleg   <- DeltaO2_vs_SumOSA_Aoroides_panel   + theme(legend.position = "none")
+PR_vs_SumOSA_Aoroides_panel_noleg        <- PR_vs_SumOSA_Aoroides_panel        + theme(legend.position = "none")
+Rind_vs_SumOSA_Aoroides_panel_noleg      <- Rind_vs_SumOSA_Aoroides_panel      + theme(legend.position = "none")
+RsumOSA_vs_SumOSA_Aoroides_panel_noleg   <- RsumOSA_vs_SumOSA_Aoroides_panel   + theme(legend.position = "none")
+PRsumOSA_vs_SumOSA_Aoroides_panel_noleg  <- PRsumOSA_vs_SumOSA_Aoroides_panel  + theme(legend.position = "none")
+
+# שורה תחתונה – רק שני איורים ועמודה שלישית ריקה
+bottom_row <- RsumOSA_vs_SumOSA_Aoroides_panel_noleg + 
+              PRsumOSA_vs_SumOSA_Aoroides_panel_noleg + 
+              plot_spacer()
+bottom_row <- bottom_row + patchwork::plot_layout(widths = c(1, 1, 1))
+
+# שורה עליונה – שלושה איורים
+top_row <- DeltaO2_vs_SumOSA_Aoroides_panel_noleg +
+           PR_vs_SumOSA_Aoroides_panel_noleg +
+           Rind_vs_SumOSA_Aoroides_panel_noleg
+top_row <- top_row + patchwork::plot_layout(widths = c(1, 1, 1))
+
+# פאנל סופי
+multi_panel_Aoroides_plot <- 
+  top_row /
+  bottom_row +
+  patchwork::plot_layout(heights = c(1, 1))
+
+multi_panel_Aoroides_plot
+
+# שמירה
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/Aoroides_5panel.png",
+  plot = multi_panel_Aoroides_plot,
+  width = 22, height = 15, dpi = 300
+)
+
+```
+
+# plot- Volume_Aoroides_df 
+```{r echo=FALSE, fig.height=7, fig.width=10}
+
+# יצירת עמודות מחושבות
+NW_Ind_summary <- NW_Ind_summary %>%
+  mutate(
+    RV_umol_hr_ml = Rind_umol_hr / Volume_ml,
+    PRV_L_hr_ml = PR_L_hr / Volume_ml
+  )
+library(dplyr)
+library(ggplot2)
+
+# עמודות מחושבות
+NW_Ind_summary <- NW_Ind_summary %>%
+  mutate(
+    RV_umol_hr_ml = Rind_umol_hr / Volume_ml,
+    PRV_L_hr_ml   = PR_L_hr / Volume_ml
+  )
+
+# Theme אחיד
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  panel.grid = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  axis.line = element_line(color = "black"),
+  axis.title = element_text(size = 15),
+  axis.text = element_text(size = 12)
+)
+
+# פונקציה ליצירת גרף log-log עם קו מגמה מובהק בלבד
+plot_power_law_simple <- function(df, xvar, yvar, xlab, ylab, point_color="#FF7F00") {
+  data_valid <- df %>%
+    filter(!is.na(.data[[xvar]]), !is.na(.data[[yvar]]), 
+           .data[[xvar]] > 0, .data[[yvar]] > 0)
+  
+  # מודל רגרסיה log-log
+  formula_str <- paste0("log(", yvar, ") ~ log(", xvar, ")")
+  model <- lm(as.formula(formula_str), data = data_valid)
+  sm <- summary(model)
+  
+  a <- exp(coef(model)[1])
+  b <- coef(model)[2]
+  r2 <- sm$r.squared
+  pval <- sm$coefficients[2, "Pr(>|t|)"]
+
+  p <- ggplot(data_valid, aes_string(x = xvar, y = yvar)) +
+    geom_point(size = 5, color = point_color, shape = 17) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = xlab, y = ylab) +
+    my_plot_theme
+  
+  if (pval < 0.05) {
+    # קו מגמה
+    x_vals <- seq(min(data_valid[[xvar]]), max(data_valid[[xvar]]), length.out = 100)
+    y_vals <- a * x_vals^b
+    trend_line <- data.frame(x = x_vals, y = y_vals)
+    eq_text <- paste0(
+      "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+      "*','~~italic(R)^2 == ", signif(r2, 3)
+    )
+    p <- p +
+      geom_line(data = trend_line, aes(x = x, y = y), inherit.aes = FALSE,
+                color = "black", linetype = "dashed", size = 1) +
+      annotate("text",
+               x = min(data_valid[[xvar]]) * 1.4,
+               y = max(data_valid[[yvar]]) * 0.65,
+               label = eq_text, parse = TRUE,
+               hjust = 0, vjust = -0.7, size = 5)
+  }
+  
+  return(p)
+}
+
+# רשימת כל הגרפים
+Delta_O2_Volume_ml_plot <- plot_power_law_simple(
+  NW_Ind_summary, "Volume_ml", "Delta_O2_umol_L_mean_mean",
+  expression("Volume (mL)"),
+  expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")")
+)
+
+PR_Volume_ml_plot <- plot_power_law_simple(
+  NW_Ind_summary, "Volume_ml", "PR_L_hr",
+  expression("Volume (mL)"),
+  expression("PR (L hr"^{-1}*")")
+)
+
+Rind_Volume_ml_plot <- plot_power_law_simple(
+  NW_Ind_summary, "Volume_ml", "Rind_umol_hr",
+  expression("Volume (mL)"),
+  expression("R"["ind"]~ " ("*mu*"mol hr"^{-1}*")")
+)
+
+RV_avg_Volume_ml_plot <- plot_power_law_simple(
+  NW_Ind_summary, "Volume_ml", "RV_umol_hr_ml",
+  expression("Volume (mL)"),
+  expression(R[V] ~ "(" * mu * "mol hr"^{-1}~mL[sponge]^{-1} * ")")
+)
+
+PRV_Volume_ml_plot <- plot_power_law_simple(
+  NW_Ind_summary, "Volume_ml", "PRV_L_hr_ml",
+  expression("Volume (mL)"),
+  expression(PR[V] ~ "(" * "L hr"^{-1} ~ mL[sponge]^{-1} * ")")
+)
+
+osculum_area_sum_Volume_ml_plot <- plot_power_law_simple(
+  NW_Ind_summary, "Volume_ml", "osculum_area_sum",
+  expression("Volume (mL)"),
+  expression(Sigma~"Osculum area (mm"^2*")")
+)
+
+Delta_O2_PRV_plot <- plot_power_law_simple(
+  NW_Ind_summary, "PRV_L_hr_ml", "Delta_O2_umol_L_mean_mean",
+  expression(PR[V] ~ "(" * "L hr"^{-1} ~ mL[sponge]^{-1} * ")"),
+  expression(Delta*O[2]~" ("*mu*"mol L"^{-1}*")")
+)
+
+
+Delta_O2_Volume_ml_plot
+PR_Volume_ml_plot
+Rind_Volume_ml_plot
+RV_avg_Volume_ml_plot
+PRV_Volume_ml_plot 
+osculum_area_sum_Volume_ml_plot 
+
+ggsave("Delta_O2_Volume_ml_plot.png", plot = Delta_O2_Volume_ml_plot, width = 10, height = 7, dpi = 300)
+ggsave("PR_Volume_ml_plot.png", plot = PR_Volume_ml_plot, width = 10, height = 7, dpi = 300)
+ggsave("Rind_Volume_ml_plot.png", plot = Rind_Volume_ml_plot, width = 10, height = 7, dpi = 300)
+ggsave("RV_avg_Volume_ml_plot.png", plot = RV_avg_Volume_ml_plot, width = 10, height = 7, dpi = 300)
+ggsave("PRV_Volume_ml_plot.png", plot = PRV_Volume_ml_plot, width = 10, height = 7, dpi = 300)
+
+ggsave("osculum_area_sum_Volume_ml_plot .png", plot = osculum_area_sum_Volume_ml_plot , width = 10, height = 7, dpi = 300)
+
+
+
+```
+
+# Panel- Volume_Aoroides_df 
+```{r, fig.width=22,fig.height=15}
+# --- יצירת כל האיורים עם שמות ייחודיים ---
+
+DeltaO2_vs_Volume_Aoroides_plot <- plot_powerlaw_single(
+  NW_Ind_summary, "Volume_ml", "Delta_O2_umol_L_mean_mean",
+  xlab = expression("Volume (mL)"),
+  ylab = expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")"),
+  fname = "DeltaO2_vs_Volume_Aoroides_plot.png"
+)
+
+PR_vs_Volume_Aoroides_plot <- plot_powerlaw_single(
+  NW_Ind_summary, "Volume_ml", "PR_L_hr",
+  xlab = expression("Volume (mL)"),
+  ylab = expression("PR (L hr"^{-1}*")"),
+  fname = "PR_vs_Volume_Aoroides_plot.png"
+)
+
+Rind_vs_Volume_Aoroides_plot <- plot_powerlaw_single(
+  NW_Ind_summary, "Volume_ml", "Rind_umol_hr",
+  xlab = expression("Volume (mL)"),
+  ylab = expression("R"["ind"]~ "("*mu*"mol hr"^{-1}*")"),
+  fname = "Rind_vs_Volume_Aoroides_plot.png"
+)
+
+RV_vs_Volume_Aoroides_plot <- plot_powerlaw_single(
+  NW_Ind_summary, "Volume_ml", "RV_umol_hr_ml",
+  xlab = expression("Volume (mL)"),
+  ylab = expression(R[V] ~ "(" * mu * "mol hr"^{-1}~mL[sponge]^{-1} * ")"),
+  fname = "RV_vs_Volume_Aoroides_plot.png"
+)
+
+PRV_vs_Volume_Aoroides_plot <- plot_powerlaw_single(
+  NW_Ind_summary, "Volume_ml", "PRV_L_hr_ml",
+  xlab = expression("Volume (mL)"),
+  ylab = expression(PR[V] ~ "(" * "L hr"^{-1} ~ mL[sponge]^{-1} * ")"),
+  fname = "PRV_vs_Volume_Aoroides_plot.png"
+)
+
+# האיור האחרון - שמור לקובץ, לא נכנס לפאנל!
+SumOSA_vs_Volume_Aoroides_plot <- plot_powerlaw_single(
+  NW_Ind_summary, "Volume_ml", "osculum_area_sum",
+  xlab = expression("Volume (mL)"),
+  ylab = expression(Sigma~"Osculum area (mm"^2*")"),
+  fname = "SumOSA_vs_Volume_Aoroides_plot.png"
+)
+
+# --- בניית פאנל (רק 5 איורים!) ---
+panel_Volume_Aoroides_plot <- 
+  (DeltaO2_vs_Volume_Aoroides_plot + PR_vs_Volume_Aoroides_plot + Rind_vs_Volume_Aoroides_plot) /
+  (RV_vs_Volume_Aoroides_plot + PRV_vs_Volume_Aoroides_plot + patchwork::plot_spacer()) +
+  patchwork::plot_layout(heights = c(1, 1))
+
+panel_Volume_Aoroides_plot
+
+# שמירת הפאנל (5 איורים בלבד)
+ggsave("Aoroides_5panel.png", plot = panel_Volume_Aoroides_plot, width = 20, height = 12, dpi = 300)
+
+# האיור השישי שמור לבד כבר בתוך הפונקציה (fname = ...)
+
+# אם רוצים לצפות אותו:
+SumOSA_vs_Volume_Aoroides_plot
+
+
+
+```
+# Plot- Osc_Osc_Aoroides_df 
+```{r, fig.width=10,fig.height=7}
+
+
+# ⚠️ אל תדרסי את הטבלה המעודכנת בטעינה מחדש:
+NW_Med_Osc_summary <- as.data.frame(all_sponge_data$NW_Mediterranean$NW_Med_Osc_summary)
+
+# Theme אחיד
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  panel.grid = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  axis.line = element_line(color = "black"),
+  axis.title = element_text(size = 15),
+  axis.text = element_text(size = 12)
+)
+
+# פונקציה לציור log-log עם קו מגמה ומשוואה (עם הגנות)
+plot_powerlaw_single <- function(df, xvar, yvar, xlab, ylab, color="#FF7F00", shape=17, fname=NULL) {
+  data_valid <- df %>%
+    filter(!is.na(.data[[xvar]]), !is.na(.data[[yvar]]),
+           .data[[xvar]] > 0, .data[[yvar]] > 0)
+
+  # בסיס גרף
+  p <- ggplot(data_valid, aes_string(x = xvar, y = yvar)) +
+    geom_point(size = 4, color = color, shape = shape) +
+    scale_x_log10() + scale_y_log10() +
+    labs(x = xlab, y = ylab) +
+    my_plot_theme
+
+  # אם יש מספיק נקודות למודל
+  if (nrow(data_valid) >= 3) {
+    formula_str <- paste0("log(", yvar, ") ~ log(", xvar, ")")
+    model <- try(lm(as.formula(formula_str), data = data_valid), silent = TRUE)
+    if (!inherits(model, "try-error")) {
+      sm  <- summary(model)
+      a   <- exp(coef(model)[1])
+      b   <- coef(model)[2]
+      r2  <- sm$r.squared
+      pval<- sm$coefficients[2, "Pr(>|t|)"]
+
+      if (is.finite(pval) && pval < 0.05 && is.finite(a) && is.finite(b)) {
+        x_vals <- seq(min(data_valid[[xvar]]), max(data_valid[[xvar]]), length.out = 100)
+        y_vals <- a * x_vals^b
+        trend_line <- data.frame(x = x_vals, y = y_vals)
+        eq_text <- paste0(
+          "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+          "*','~~italic(R)^2 == ", signif(r2, 3)
+        )
+        p <- p +
+          geom_line(data = trend_line, aes(x = x, y = y),
+                    inherit.aes = FALSE, linetype = "dashed", size = 1) +
+          annotate("text",
+                   x = min(data_valid[[xvar]]) * 1.3,
+                   y = max(data_valid[[yvar]]) * 0.78,
+                   label = eq_text, parse = TRUE,
+                   hjust = 0, vjust = -0.7, size = 5)
+      }
+    }
+  }
+
+  if (!is.null(fname)) ggsave(fname, plot = p, width = 8, height = 7, dpi = 300)
+  p
+}
+
+# === דתי־פריים ממוקדים לכל גרף (ללא סינון קשיח כללי) ===
+
+# OFR ~ Osculum Area (לא צריך DeltaO2/Volume)
+osc_for_OFR_Area <- NW_Med_Osc_summary %>%
+  filter(
+    Species == "A.oroides",
+    !is.na(osculum_area_mm2), osculum_area_mm2 > 0,
+    !is.na(OFR_L_hr_mean),    OFR_L_hr_mean > 0
+  )
+
+# Delta O2 ~ Osculum Area (לא צריך Volume ולא OFR)
+osc_for_DeltaO2_Area <- NW_Med_Osc_summary %>%
+  filter(
+    Species == "A.oroides",
+    !is.na(osculum_area_mm2),     osculum_area_mm2 > 0,
+    !is.na(Delta_O2_umol_L_mean), Delta_O2_umol_L_mean > 0
+  )
+
+# Rosc ~ Osculum Area (צריך גם DeltaO2 וגם OFR)
+osc_for_Rosc <- NW_Med_Osc_summary %>%
+  filter(
+    Species == "A.oroides",
+    !is.na(osculum_area_mm2),     osculum_area_mm2 > 0,
+    !is.na(OFR_L_hr_mean),        OFR_L_hr_mean > 0,
+    !is.na(Delta_O2_umol_L_mean), Delta_O2_umol_L_mean > 0
+  ) %>%
+  mutate(Rosc = Delta_O2_umol_L_mean * OFR_L_hr_mean)
+
+# Osculum Area ~ Volume (לא צריך OFR/DeltaO2)
+osc_for_Area_Vol <- NW_Med_Osc_summary %>%
+  filter(
+    Species == "A.oroides",
+    !is.na(osculum_area_mm2), osculum_area_mm2 > 0,
+    !is.na(Volume_ml),        Volume_ml > 0
+  )
+
+# === יצירת האיורים ===
+
+DeltaO2_vs_OscArea_Aoroides_plot <- plot_powerlaw_single(
+  osc_for_DeltaO2_Area,
+  xvar = "osculum_area_mm2",
+  yvar = "Delta_O2_umol_L_mean",
+  xlab = expression("Osculum area (mm"^2*")"),
+  ylab = expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")"),
+  fname = "DeltaO2_vs_OscArea_Aoroides_plot.png"
+)
+
+OFR_vs_OscArea_Aoroides_plot <- plot_powerlaw_single(
+  osc_for_OFR_Area,
+  xvar = "osculum_area_mm2",
+  yvar = "OFR_L_hr_mean",
+  xlab = expression("Osculum area (mm"^2*")"),
+  ylab = expression("OFR (L hr"^{-1}*")"),
+  fname = "OFR_vs_OscArea_Aoroides_plot.png"
+)
+
+Rosc_vs_OscArea_Aoroides_plot <- plot_powerlaw_single(
+  osc_for_Rosc,
+  xvar = "osculum_area_mm2",
+  yvar = "Rosc",
+  xlab = expression("Osculum area (mm"^2*")"),
+  ylab = expression("R"[osc]~ "("*mu*"mol hr"^{-1}*")"),
+  fname = "Rosc_vs_OscArea_Aoroides_plot.png"
+)
+
+OscArea_vs_Volume_Aoroides_plot <- plot_powerlaw_single(
+  osc_for_Area_Vol,
+  xvar = "Volume_ml",
+  yvar = "osculum_area_mm2",
+  xlab = expression("Volume (mL)"),
+  ylab = expression("Osculum area (mm"^2*")"),
+  fname = "OscArea_vs_Volume_Aoroides_plot.png"
+)
+
+# צפייה ישירה אם רוצים
+# DeltaO2_vs_OscArea_Aoroides_plot
+# OFR_vs_OscArea_Aoroides_plot
+# Rosc_vs_OscArea_Aoroides_plot
+# OscArea_vs_Volume_Aoroides_plot
+
+
+```
+
+# Panel- Osc_Osc_Aoroides_df 
+```{r, fig.width=11,fig.height=10}
+
+# ====== Panel - Osc_Osc_Aoroides_df ======
+
+# גרסאות ללא מקרא (אין בעצם צבעים/מקרא, אבל נשאיר תאימות)
+DeltaO2_vs_OscArea_Aoroides_noleg <- DeltaO2_vs_OscArea_Aoroides_plot + theme(legend.position = "none")
+OFR_vs_OscArea_Aoroides_noleg    <- OFR_vs_OscArea_Aoroides_plot + theme(legend.position = "none")
+Rosc_vs_OscArea_Aoroides_noleg   <- Rosc_vs_OscArea_Aoroides_plot + theme(legend.position = "none")
+
+# אם בכל זאת נוצר מקרא, נחלץ אותו; אם לא – נשים spacer
+leg_try <- try(get_legend(
+  DeltaO2_vs_OscArea_Aoroides_plot + theme(
+    legend.position = "right",
+    legend.text  = element_text(size = 10, face = "italic"),
+    legend.title = element_text(size = 11),
+    legend.key.size  = unit(0.35, "cm"),
+    legend.spacing.y = unit(0.01, "cm"),
+    legend.margin    = margin(0, 0, 0, 0),
+    legend.box.margin= margin(0, 0, 0, 0)
+  )
+), silent = TRUE)
+
+legend_Osc_Aoroides <- if (inherits(leg_try, "try-error") || is.null(leg_try)) plot_spacer() else wrap_elements(leg_try)
+
+# שורות לפאנל
+bottom_row_Osc_Aoroides <- Rosc_vs_OscArea_Aoroides_noleg + plot_spacer() + legend_Osc_Aoroides
+bottom_row_Osc_Aoroides <- bottom_row_Osc_Aoroides + plot_layout(widths = c(0.6, 0.05, 0.35))
+
+top_row_Osc_Aoroides <- DeltaO2_vs_OscArea_Aoroides_noleg + OFR_vs_OscArea_Aoroides_noleg + plot_spacer()
+top_row_Osc_Aoroides <- top_row_Osc_Aoroides + plot_layout(widths = c(1, 1, 0.05))
+
+# פאנל סופי (האזור Volume~Area לא נכנס כאן לפי הבקשה המקורית)
+multi_panel_Osc_Aoroides_plot <-
+  top_row_Osc_Aoroides /
+  bottom_row_Osc_Aoroides +
+  plot_layout(guides = "collect", heights = c(1, 1))
+
+# צפייה ושמירה
+multi_panel_Osc_Aoroides_plot
+
+ggsave(
+  "Aoroides_Osculum_area_3panel.png",
+  plot = multi_panel_Osc_Aoroides_plot,
+  width = 11, height = 10, dpi = 300
+)
+
+
+```
+
+
+```{r, fig.width=12,fig.height=6}
+
+
+panel <- plot_grid(
+  OscArea_vs_Volume_Aoroides_noleg,
+  SumOSA_vs_Volume_Aoroides_noleg,
+  labels = c("A", "B"),
+  label_size = 18,
+  nrow = 1,
+  align = "hv",
+  rel_widths = c(1, 1.1)  # הגדלת איור B (הימני)
+)
+panel
+
+ggsave("Panel_OscSum_vs_Volume_Aoroides_cowplot_wideB.png", panel, width = 12, height = 6, dpi = 300)
+
+
+```
+
+# פאנל הסרת חמצן אגלס 
+```{r, fig.width=18,fig.height=6}
+
+library(ggplot2)
+library(patchwork)
+
+# שמות האיורים שצריכים להיות בסביבה
+needed <- c(
+  "DeltaO2_vs_OscArea_Aoroides_plot",
+  "DeltaO2_vs_SumOSA_Aoroides_panel_noleg",
+  "DeltaO2_vs_Volume_Aoroides_plot"
+)
+
+miss <- needed[!sapply(needed, exists, inherits = TRUE)]
+if (length(miss)) stop("חסרים האיורים: ", paste(miss, collapse = ", "))
+
+# הסרת מקרא
+p1 <- DeltaO2_vs_OscArea_Aoroides_plot + theme(legend.position = "none")
+p2 <- DeltaO2_vs_SumOSA_Aoroides_panel_noleg + theme(legend.position = "none")
+p3 <- DeltaO2_vs_Volume_Aoroides_plot + theme(legend.position = "none")
+
+# פאנל 3 בשורה (בלי שימוש ב-&)
+panel_3plots <-
+  (p1 | p2 | p3) +
+  plot_annotation(tag_levels = "A") +
+  theme(
+    plot.tag = element_text(size = 16, face = "bold"),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+# הצגה
+panel_3plots
+
+# שמירה
+ggsave(
+  filename = "DeltaO2_Aoroides_3panel.png",
+  plot     = panel_3plots,
+  width    = 18,
+  height   = 6,
+  dpi      = 300,
+  bg       = "white"
+)
+
+```
+# Panel- כללי רק לאגלס 
+```{r, fig.width=19,fig.height=31}
+
+# -------- טור 1: שלושה איורים, רק התחתון עם ציר X, שמות ייחודיים --------
+panel_col1_aoroides <- (
+  (DeltaO2_vs_OscArea_Aoroides_noleg + labs(x = NULL)) /
+  (OFR_vs_OscArea_Aoroides_noleg     + labs(x = NULL)) /
+  Rosc_vs_OscArea_Aoroides_noleg /
+  plot_spacer() /
+  plot_spacer() /
+  plot_spacer()
+) +
+  plot_layout(heights = c(0.26, 0.26, 0.26, 0.17, 0.17, 0.17)) # 3 איורים, 3 spacer
+
+# -------- טור 2 --------
+panel_col2_aoroides <- (
+  (DeltaO2_vs_SumOSA_Aoroides_panel_noleg  + labs(x = NULL)) /
+  (PR_vs_SumOSA_Aoroides_panel_noleg       + labs(x = NULL)) /
+  (Rind_vs_SumOSA_Aoroides_panel_noleg     + labs(x = NULL)) /
+  (PRsumOSA_vs_SumOSA_Aoroides_panel_noleg + labs(x = NULL)) /
+  RsumOSA_vs_SumOSA_Aoroides_panel_noleg
+)
+
+# -------- טור 3 --------
+panel_col3_aoroides <- (
+  (DeltaO2_vs_Volume_Aoroides_plot + labs(x = NULL)) /
+  (PR_vs_Volume_Aoroides_plot      + labs(x = NULL)) /
+  (Rind_vs_Volume_Aoroides_plot    + labs(x = NULL)) /
+  (PRV_vs_Volume_Aoroides_plot     + labs(x = NULL)) /
+  RV_vs_Volume_Aoroides_plot
+)
+
+# -------- פאנל סופי --------
+# כל שורה (שני/שלישי טור) – דוגמה כללית
+row1 <- DeltaO2_vs_OscArea_Aoroides_noleg | DeltaO2_vs_SumOSA_Aoroides_panel_noleg | DeltaO2_vs_Volume_Aoroides_plot
+row2 <- OFR_vs_OscArea_Aoroides_noleg     | PR_vs_SumOSA_Aoroides_panel_noleg      | PR_vs_Volume_Aoroides_plot
+row3 <- Rosc_vs_OscArea_Aoroides_noleg    | Rind_vs_SumOSA_Aoroides_panel_noleg    | Rind_vs_Volume_Aoroides_plot
+row4 <- plot_spacer()                     | PRsumOSA_vs_SumOSA_Aoroides_panel_noleg| PRV_vs_Volume_Aoroides_plot
+row5 <- plot_spacer()                     | RsumOSA_vs_SumOSA_Aoroides_panel_noleg | RV_vs_Volume_Aoroides_plot
+
+big_panel_plot_aoroides <-
+  row1 / row2 / row3 / row4 / row5 +
+  plot_layout(
+    guides = "collect",
+    heights = rep(1, 5)
+  ) +
+  plot_annotation(
+    tag_levels = "A",
+    theme = theme(plot.tag = element_text(face = "bold", size = 20))
+  )
+
+
+
+big_panel_plot_aoroides
+
+# ---- שמירה ----
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/big_3col_panel_final_aoroides.png",
+  plot = big_panel_plot_aoroides,
+  width = 19, height = 31, dpi = 300
+)
+
+
+
+
+
+```
+
+#פאנל קצב שאיבה רק לאגלס
+```{r, fig.width=10,fig.height=7}
+library(ggplot2)
+library(patchwork)
+library(grid)
+
+# 1) בדיקה שהאובייקטים קיימים
+needed <- c(
+  "PR_Volume_ml_plot", "PRV_Volume_ml_plot",
+  "OFR_vs_OscArea_Aoroides_plot", "PR_vs_SumOSA_Aoroides_panel"
+)
+
+miss <- needed[!sapply(needed, exists, inherits = TRUE)]
+if (length(miss)) stop("חסרים האיורים: ", paste(miss, collapse = ", "))
+
+# 2) בלי מקרא בכל אחד
+pA <- OFR_vs_OscArea_Aoroides_plot + theme(legend.position = "none")
+pB <- PR_vs_SumOSA_Aoroides_panel  + theme(legend.position = "none")
+pC <- PR_Volume_ml_plot            + theme(legend.position = "none")
+pD <- PRV_Volume_ml_plot           + theme(legend.position = "none")
+
+# 3) Theme גדול לצירים/כותרות
+big_axes <- theme(
+  axis.title   = element_text(size = 22),
+  axis.text    = element_text(size = 18),
+  strip.text   = element_text(size = 18, face = "bold"),
+  axis.title.x = element_text(margin = margin(t = 8)),
+  axis.title.y = element_text(margin = margin(r = 8)),
+  plot.tag     = element_text(size = 18, face = "bold"),
+  plot.background = element_rect(fill = "white", color = NA),
+  panel.spacing   = unit(1.2, "lines")
+)
+
+# 4) מוסיפים את ה-theme לכל גרף מראש
+pA_big <- pA + big_axes
+pB_big <- pB + big_axes
+pC_big <- pC + big_axes
+pD_big <- pD + big_axes
+
+# 5) פאנל 2x2
+panel_no_legend_big <-
+  ((pA_big | pB_big) /
+   (pC_big | pD_big)) +
+  plot_annotation(tag_levels = "A")
+
+# הצגה
+panel_no_legend_big
+
+# שמירה
+ggsave(
+  filename = "panel_no_legend_big.png",
+  plot     = panel_no_legend_big,
+  width    = 12,
+  height   = 12,
+  dpi      = 300,
+  bg       = "white"
+)
+```
+###קוד שצריך לעשות בו סדר הוא לא יעבוד עכשיו 
+
+```{r, fig.width=10,fig.height=7}
+
+Underwater_data<-read_rds("C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/Underwater_summary_data.rds")
+
+
+Underwater_summary_data <- Underwater_data %>%
+  mutate(
+    Total_OFR = mean_OFR_L_hr,  # מכיוון שאין קבוצות נוספות, השאר כערך המקורי
+    Pumping_rate = Total_OFR / Species_volume,
+    Total_respiration = Total_OFR * mean_delta,
+    Specific_respiration = Pumping_rate * mean_delta
+  )
+```
+
+```{r, fig.width=25,fig.height=35}
+
+# 🎨 גרף סדרות זמן עם צבעים קבועים לפי מין
+Eilat_Time_Series_plot <- ggplot(Eilat_clean, aes(x = DateTime, y = Delta_O2, color = Species_name)) +
+  geom_point(size = 2) +  # קו סדרת זמן
+  facet_wrap(~ Oscula, scales = "free", ncol = 4) +  # שולטת במספר עמודות
+  scale_color_manual(values = c(
+    "C.cyathophora"  = "#4DAF4A",
+    "C.siphonella"   = "#377EB8",
+    "D.erythraeanus" = "#A65628",
+    "N.rowi"         = "#984EA3",
+    "S.clavatus"     = "#EEB422",
+    "T.swinhoei"     = "#E41A1C",
+    "A.oroides"      = "#FF7F00"
+  )) +
+   scale_x_datetime(date_labels = "%H:%M") +  # 🟢 מציג רק שעה
+  labs(
+    x = "",
+    y = expression(Delta * O[2] * " (µmol L"^{-1}*")"),
+    color = ""
+  ) +
+theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  legend.key = element_rect(fill = "white", color = NA, size = 20),
+  legend.title = element_text(size = 15),
+  legend.text = element_text(size = 20, face = "italic"),  # 🟢 נטוי
+  legend.key.size = unit(1, "cm"),
+  legend.key.width = unit(1, "cm"),
+  legend.position = c(0.6, 0.04),  # 🟢 ימין למטה – אפשר לשחק עם המספרים
+  panel.background = element_blank(), 
+  axis.line = element_line(colour = "black"),
+  strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+  axis.title.y = element_text(size = 15),
+  axis.title.x = element_blank(),
+  axis.text.y = element_text(size = 15),
+  axis.text.x = element_text(size = 15),
+  strip.text = element_text(size = 15)  # 🟢 לא נטוי יותר
+)
+
+
+# 🟢 שמירת האיור
+ggsave("C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/Eilat_Time_Series_plot.png",
+       plot = Eilat_Time_Series_plot, width = 25, height = 35 , dpi = 300)
+
+# הצגה
+Eilat_Time_Series_plot
+
+```
+
+```{r, fig.width=25,fig.height=35}
+
+
+# שלב 1: עיגול כל 3 שעות
+Eilat_clean <- Eilat_clean %>%
+  mutate(
+    Hour = as.numeric(format(DateTime, "%H")),
+    Hour_bin = floor(Hour / 3) * 3,
+    Time_bin_label = sprintf("%02d:00", Hour_bin)  # יוצר טקסט בצורה "03:00"
+  )
+
+
+Eilat_clean <- Eilat_clean %>%
+  mutate(Time_bin_hms = hms::as_hms(Hour_bin * 3600))  # המרה לשעות בפורמט hms
+
+
+# שלב 2: חישוב סטטיסטיקות
+Eilat_Oscula_3h_summary <- Eilat_clean %>%
+  group_by(Species_name, Individual, Oscula, Time_bin_hms) %>%
+  summarise(
+    n = sum(!is.na(Delta_O2)),                               # מספר מדידות
+    mean_Delta_O2 = mean(Delta_O2, na.rm = TRUE),            # ממוצע
+    median_Delta_O2 = median(Delta_O2, na.rm = TRUE),        # חציון
+    sd_Delta_O2 = sd(Delta_O2, na.rm = TRUE),                # סטיית תקן
+    SE_Delta_O2 = sd_Delta_O2 / sqrt(n),                     # שגיאת תקן (SE)
+    CI95_Delta_O2 = 1.96 * SE_Delta_O2,                      # רווח סמך 95%
+    CV_Delta_O2 = (sd_Delta_O2 / mean_Delta_O2) * 100,       # מקדם השתנות (CV%)
+    mean_Temp = mean(Temp, na.rm = TRUE),                    # טמפ' ממוצעת (אם חשוב)
+    .groups = "drop"
+  )
+
+Eilat_Oscula_3h_plot <- ggplot(Eilat_Oscula_3h_summary, aes(x = Time_bin_hms, y = mean_Delta_O2, color = Species_name)) +
+  # ✅ רקע אפור לשעות החשכה
+  annotate("rect",
+           xmin = hms::hms(hours = 0), xmax = hms::hms(hours = 6),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  annotate("rect",
+           xmin = hms::hms(hours = 18), xmax = hms::hms(hours = 24),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  
+  # ✅ שאר הגרף שלך (בלי שינוי)
+  geom_ribbon(aes(ymin = mean_Delta_O2 - CI95_Delta_O2, ymax = mean_Delta_O2 + CI95_Delta_O2, fill = Species_name),
+              alpha = 0.2, color = NA) +
+  geom_line() +
+  geom_point(size = 4) +
+  facet_wrap(~ Oscula, scales = "free", ncol = 4) +
+  labs(
+    x = "Time of Day (binned every 3 hours)",
+    y = expression(Delta * O[2] * " (µmol L"^{-1}*")"),
+    color = "",
+    fill = ""
+  ) +
+  scale_x_time(
+    breaks = hms::hms(hours = seq(0, 24, by = 3)),
+    labels = scales::label_time(format = "%H:%M")
+  ) +
+  scale_color_manual(values = c(
+    "C.cyathophora"  = "#4DAF4A",
+    "C.siphonella"   = "#377EB8",
+    "D.erythraeanus" = "#A65628",
+    "N.rowi"         = "#984EA3",
+    "S.clavatus"     = "#EEB422",
+    "T.swinhoei"     = "#E41A1C",
+    "A.oroides"      = "#FF7F00"
+  )) +
+  scale_fill_manual(values = c(
+    "C.cyathophora"  = "#4DAF4A",
+    "C.siphonella"   = "#377EB8",
+    "D.erythraeanus" = "#A65628",
+    "N.rowi"         = "#984EA3",
+    "S.clavatus"     = "#EEB422",
+    "T.swinhoei"     = "#E41A1C",
+    "A.oroides"      = "#FF7F00"
+  )) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 20),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 20, face = "italic"),
+    legend.key.size = unit(1, "cm"),
+    legend.key.width = unit(1, "cm"),
+    legend.position = c(0.6, 0.04),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+    strip.text = element_text(size = 15)
+  )
+
+
+
+# 🟢 שמירת האיור
+ggsave("C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/Eilat_Oscula_3h_plot.png",
+       plot = Eilat_Oscula_3h_plot, width = 25, height = 35 , dpi = 300)
+
+
+
+Eilat_Oscula_3h_plot
+
+
+
+
+```
+
+
+
+```{r, fig.width=15,fig.height=10}
+
+
+
+Eilat_Species_3h_summary <- Eilat_clean %>%
+  group_by(Species_name, Time_bin_hms) %>%
+  summarise(
+    n = sum(!is.na(Delta_O2)),
+    mean_Delta_O2 = mean(Delta_O2, na.rm = TRUE),
+    median_Delta_O2 = median(Delta_O2, na.rm = TRUE),
+    sd_Delta_O2 = sd(Delta_O2, na.rm = TRUE),
+    SE_Delta_O2 = sd_Delta_O2 / sqrt(n),
+    CI95_Delta_O2 = 1.96 * SE_Delta_O2,
+    CV_Delta_O2 = (sd_Delta_O2 / mean_Delta_O2) * 100,
+    mean_Temp = mean(Temp, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+
+
+Eilat_Species_3h_plot <- ggplot(Eilat_Species_3h_summary, aes(x = Time_bin_hms, y = mean_Delta_O2, color = Species_name, fill = Species_name)) +
+  # רקע אפור לשעות החשכה
+  annotate("rect",
+           xmin = hms::hms(hours = 0), xmax = hms::hms(hours = 6),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  annotate("rect",
+           xmin = hms::hms(hours = 18), xmax = hms::hms(hours = 24),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  
+  # שאר הגרף
+  geom_ribbon(aes(ymin = mean_Delta_O2 - CI95_Delta_O2, ymax = mean_Delta_O2 + CI95_Delta_O2), alpha = 0.2, color = NA) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  facet_wrap(~ Species_name, scales = "free_y", ncol = 3) +  # ✅ חלוקה לפי מין
+  labs(
+    x = "Time of Day (binned every 3 hours)",
+    y = expression(Delta * O[2] * " (µmol L"^{-1}*")"),
+    color = "",
+    fill = ""
+  ) +
+  scale_x_time(
+    breaks = hms::hms(hours = seq(0, 24, by = 3)),
+    labels = scales::label_time(format = "%H:%M")
+  ) +
+  scale_color_manual(values = c(
+    "C.cyathophora"  = "#4DAF4A",
+    "C.siphonella"   = "#377EB8",
+    "D.erythraeanus" = "#A65628",
+    "N.rowi"         = "#984EA3",
+    "S.clavatus"     = "#EEB422",
+    "T.swinhoei"     = "#E41A1C",
+    "A.oroides"      = "#FF7F00"
+  )) +
+  scale_fill_manual(values = c(
+    "C.cyathophora"  = "#4DAF4A",
+    "C.siphonella"   = "#377EB8",
+    "D.erythraeanus" = "#A65628",
+    "N.rowi"         = "#984EA3",
+    "S.clavatus"     = "#EEB422",
+    "T.swinhoei"     = "#E41A1C",
+    "A.oroides"      = "#FF7F00"
+  )) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 20),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 20, face = "italic"),
+    legend.key.size = unit(1, "cm"),
+    legend.key.width = unit(1, "cm"),
+    legend.position = c(0.5, 0.1),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+    strip.text = element_text(size = 15, face = "italic")
+  )
+
+
+
+# 🟢 שמירת האיור
+ggsave("C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/Eilat_Species_3h_plot.png",
+       plot = Eilat_Species_3h_plot, width = 15, height = 10 , dpi = 300)
+
+
+
+Eilat_Species_3h_plot
+
+
+
+
+```
+
+
+```{r, fig.width=25,fig.height=35}
+
+
+# ✅ הגדרת צבעים
+species_colors <- c(
+  "C.cyathophora"   = "#BAD6D3",
+  "C.siphonella"    = "#939ECC",
+  "D.erythraeanus"  = "#A65628",
+  "N.rowi"          = "#377EB8",
+  "S.clavatus"      = "#EEB422",
+  "T.swinhoei"      = "#8B2323",
+  "A.oroides"       = "#FF7F00",
+  "C.reniformis"    = "#BD9D80",
+  "D.avara"         = "#A680BD",
+  "M.fistulifera"   = "#E41A1C"
+  
+)
+
+
+
+DeltaO2_data <- DeltaO2_data %>%
+  mutate(Species = case_when(
+    Species_name == "Dysidea avara"         ~ "D.avara",
+    Species_name == "Agelas oroides"        ~ "A.oroides",
+    Species_name == "Chondrosia reniformis" ~ "C.reniformis",
+    TRUE                                    ~ NA_character_  # למקרה שיש עוד מינים
+  ))
+
+
+# ✅ שלב 1: ציור סדרת הזמן המלאה (כל נקודה)
+DeltaO2_Unique_Code_Time_Series_plot <- ggplot(DeltaO2_data, aes(x = DateTime, y = Delta_O2, color = Species)) +
+  geom_point(size = 1) +
+  facet_wrap(~ Unique_Code, scales = "free_x", ncol = 4) +
+  scale_color_manual(values = species_colors) +
+  scale_x_datetime(date_labels = "%H:%M") +
+  labs(
+    x = "",
+    y = expression(Delta * O[2] * " (µmol L"^{-1}*")"),
+    color = ""
+  ) +
+theme(
+  panel.grid.major = element_blank(), 
+  panel.grid.minor = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  legend.key = element_rect(fill = "white", color = NA, size = 20),
+  legend.title = element_text(size = 15),
+  legend.text = element_text(size = 20, face = "italic"),  # 🟢 נטוי
+  legend.key.size = unit(1, "cm"),
+  legend.key.width = unit(1, "cm"),
+  legend.position = "bottom",  # מקרא למטה
+  legend.justification = "center",  # מיושר למרכז
+  legend.box = "horizontal",  # פריסה אופקית של המקרא
+  panel.background = element_blank(), 
+  axis.line = element_line(colour = "black"),
+  strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+  axis.title.y = element_text(size = 15),
+  axis.title.x = element_blank(),
+  axis.text.y = element_text(size = 15),
+  axis.text.x = element_text(size = 15),
+  strip.text = element_text(size = 15)  # 🟢 לא נטוי יותר
+)
+
+
+# ✅ הצגת הגרף
+DeltaO2_Unique_Code_Time_Series_plot
+
+# ✅ שמירת הגרף
+ggsave("DeltaO2_Unique_Code_Time_Series_plot.png",
+       plot = DeltaO2_Unique_Code_Time_Series_plot, width = 25, height = 35, dpi = 300)
+
+
+# ✅ שלב 2: עיבוד זמן (עיגול כל 3 שעות)
+DeltaO2_data <- DeltaO2_data %>%
+  mutate(
+    Hour = as.numeric(format(DateTime, "%H")),
+    Hour_bin = floor(Hour / 3) * 3,
+    Time_bin_label = sprintf("%02d:00", Hour_bin)  # יוצר טקסט בצורה "03:00"
+  )
+
+
+DeltaO2_data <- DeltaO2_data %>%
+  mutate(Time_bin_hms = hms::as_hms(Hour_bin * 3600))  # המרה לשעות בפורמט hms
+
+
+
+# ✅ חישוב סטטיסטיקות לכל Oscula ושעת בינון
+DeltaO2_Unique_Code_3h_summary <- DeltaO2_data %>%
+  group_by(Unique_Code, Species, Individual, Oscula, Time_bin_hms) %>%
+  summarise(
+    n = sum(!is.na(Delta_O2)),
+    mean_Delta_O2 = mean(Delta_O2, na.rm = TRUE),
+    sd_Delta_O2 = sd(Delta_O2, na.rm = TRUE),
+    SE_Delta_O2 = sd_Delta_O2 / sqrt(n),
+    CI95_Delta_O2 = 1.96 * SE_Delta_O2,
+    .groups = "drop"
+  )
+
+# ✅ ציור גרף ממוצע לכל Oscula (לפי 3 שעות)
+DeltaO2_Unique_Code_3h_plot <- ggplot(DeltaO2_Unique_Code_3h_summary, 
+                           aes(x = Time_bin_hms, y = mean_Delta_O2, color = Species)) +
+  # ✅ רקע אפור לשעות החשכה
+  annotate("rect",
+           xmin = hms::hms(hours = 0), xmax = hms::hms(hours = 6),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  annotate("rect",
+           xmin = hms::hms(hours = 18), xmax = hms::hms(hours = 24),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  
+  # ✅ שאר הגרף שלך (בלי שינוי)
+  geom_ribbon(aes(ymin = mean_Delta_O2 - CI95_Delta_O2, ymax = mean_Delta_O2 + CI95_Delta_O2, fill = Species),
+              alpha = 0.2, color = NA) +
+  geom_line() +
+  geom_point(size = 4) +
+  facet_wrap(~ Unique_Code, scales = "free", ncol = 4) +
+  labs(
+    x = "Time of Day (binned every 3 hours)",
+    y = expression(Delta * O[2] * " (µmol L"^{-1}*")"),
+    color = "",
+    fill = ""
+  ) +
+  scale_x_time(
+    breaks = hms::hms(hours = seq(0, 24, by = 3)),
+    labels = scales::label_time(format = "%H:%M")
+  ) +
+  scale_color_manual(values = c(species_colors)) +
+  scale_fill_manual(values = c(species_colors)) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 20),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 20, face = "italic"),  # 🟢 נטוי
+    legend.key.size = unit(1, "cm"),
+    legend.key.width = unit(1, "cm"),
+    legend.position = "bottom",  # מקרא למטה
+    legend.justification = "center",  # מיושר למרכז
+    legend.box = "horizontal",  # פריסה אופקית של המקרא
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+    strip.text = element_text(size = 15)
+  )
+
+
+# ✅ הצגת הגרף
+DeltaO2_Unique_Code_3h_plot
+
+# ✅ שמירת הגרף
+ggsave("DeltaO2_Unique_Code_3h_plot.png",
+       plot = DeltaO2_Unique_Code_3h_plot, width = 25, height = 35, dpi = 300)
+
+
+
+```
+
+
+
+```{r, fig.width=15,fig.height=10}
+
+
+
+DeltaO2_Species_3h_summary <- DeltaO2_data %>%
+  group_by(Species, Time_bin_hms) %>%
+  summarise(
+    n = sum(!is.na(Delta_O2)),
+    mean_Delta_O2 = mean(Delta_O2, na.rm = TRUE),
+    median_Delta_O2 = median(Delta_O2, na.rm = TRUE),
+    sd_Delta_O2 = sd(Delta_O2, na.rm = TRUE),
+    SE_Delta_O2 = sd_Delta_O2 / sqrt(n),
+    CI95_Delta_O2 = 1.96 * SE_Delta_O2,
+    CV_Delta_O2 = (sd_Delta_O2 / mean_Delta_O2) * 100,
+    mean_Temp = mean(Temp, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+
+
+DeltaO2_Species_3h_plot <- ggplot(DeltaO2_Species_3h_summary, aes(x = Time_bin_hms, y = mean_Delta_O2, color = Species, fill = Species)) +
+  # רקע אפור לשעות החשכה
+  annotate("rect",
+           xmin = hms::hms(hours = 0), xmax = hms::hms(hours = 6),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  annotate("rect",
+           xmin = hms::hms(hours = 18), xmax = hms::hms(hours = 24),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  
+  # שאר הגרף
+  geom_ribbon(aes(ymin = mean_Delta_O2 - CI95_Delta_O2, ymax = mean_Delta_O2 + CI95_Delta_O2), alpha = 0.2, color = NA) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  facet_wrap(~ Species, scales = "free_y", ncol = 3) +  # ✅ חלוקה לפי מין
+  labs(
+    x = "Time of Day (binned every 3 hours)",
+    y = expression(Delta * O[2] * " (µmol L"^{-1}*")"),
+    color = "",
+    fill = ""
+  ) +
+  scale_x_time(
+    breaks = hms::hms(hours = seq(0, 24, by = 3)),
+    labels = scales::label_time(format = "%H:%M")
+  ) +
+  scale_color_manual(values = c(species_colors)) +
+  scale_fill_manual(values = c(species_colors)) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+  legend.key = element_rect(fill = "white", color = NA, size = 20),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 20, face = "italic"),  # 🟢 נטוי
+    legend.key.size = unit(1, "cm"),
+    legend.key.width = unit(1, "cm"),
+    legend.position = "bottom",  # מקרא למטה
+    legend.justification = "center",  # מיושר למרכז
+    legend.box = "horizontal",  # פריסה אופקית של המקרא
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    axis.title.y = element_text(size = 15),
+    axis.title.x = element_blank(),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+    strip.text = element_text(size = 15, face = "italic")
+  )
+
+
+
+# 🟢 שמירת האיור
+ggsave("C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/DeltaO2_Species_3h_plot.png",
+       plot = DeltaO2_Species_3h_plot, width = 15, height = 10 , dpi = 300)
+
+
+
+DeltaO2_Species_3h_plot
+
+
+
+
+```
+
+
+```{r, fig.width=16,fig.height=10}
+
+
+# ✅ שלב 1: ניקוי קובץ DeltaO2_Species_3h_summary
+DeltaO2_Species_3h_summary <- DeltaO2_Species_3h_summary %>%
+  as_tibble() %>%           # הסרת rowwise (אם היה)
+  ungroup() %>%             # ביטול קבוצות
+  mutate(
+    Species = factor(Species, levels = c("A.oroides", "D.avara", "C.reniformis"))
+  )
+
+# ✅ שלב 2: ניקוי קובץ Eilat_Species_3h_summary
+Eilat_Species_3h_summary <- Eilat_Species_3h_summary %>%
+  as_tibble() %>%
+  ungroup() %>%
+  mutate(
+    mean_Temp = na_if(mean_Temp, -300),  # הסרת טמפרטורות שגויות
+    Species = as.character(Species_name),  # יצירת עמודה Species תואמת
+    Species = factor(Species, levels = c("C.cyathophora", "C.siphonella", "D.erythraeanus",
+                                         "N.rowi", "S.clavatus", "T.swinhoei", "A.oroides"))  # לפי סדר המינים שלך
+  ) 
+
+# ✅ שלב 3: איחוד הקבצים
+combined_Species_3h_summary <- bind_rows(DeltaO2_Species_3h_summary, Eilat_Species_3h_summary)
+
+combined_Species_3h_summary <-combined_Species_3h_summary %>%
+  filter(!is.na(Species))
+
+
+
+
+combined_Species_3h_plot <- ggplot(combined_Species_3h_summary, aes(x = Time_bin_hms, y = mean_Delta_O2, color = Species, fill = Species)) +
+  # רקע אפור לשעות החשכה
+  annotate("rect",
+           xmin = hms::hms(hours = 0), xmax = hms::hms(hours = 6),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  annotate("rect",
+           xmin = hms::hms(hours = 18), xmax = hms::hms(hours = 24),
+           ymin = -Inf, ymax = Inf,
+           fill = "grey90", alpha = 0.5) +
+  # שאר הגרף
+  geom_ribbon(aes(ymin = mean_Delta_O2 - CI95_Delta_O2, ymax = mean_Delta_O2 + CI95_Delta_O2), alpha = 0.2, color = NA) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  facet_wrap(~ Species, scales = "free_y", ncol = 3) +
+  labs(
+    x = "Time of Day (binned every 3 hours)",
+    y = expression(Delta * O[2] * " (µmol L"^{-1}*")"),
+    color = "",
+    fill = ""
+  ) +
+  scale_x_time(
+    breaks = hms::hms(hours = seq(0, 24, by = 3)),
+    labels = scales::label_time(format = "%H:%M")
+  ) +
+  scale_color_manual(values = species_colors) +
+  scale_fill_manual(values = species_colors) +
+#  coord_cartesian(ylim = c(0, 50)) +  # ✅ הגבלת ציר Y
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 20),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 20, face = "italic"),
+    legend.key.size = unit(1, "cm"),
+    legend.key.width = unit(1, "cm"),
+    legend.position = "bottom",
+    legend.justification = "center",
+    legend.box = "horizontal",
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    axis.title = element_text(size = 20),
+    axis.text.y = element_text(size = 18),
+    axis.text.x = element_text(size = 18, angle = 45, hjust = 1),
+    strip.text = element_text(size = 15, face = "italic")
+  )
+
+
+
+# ✅ שמירת הגרף
+ggsave("combined_Species_3h_plot.png",
+       plot = combined_Species_3h_plot, width = 16, height = 10, dpi = 300)
+
+
+combined_Species_3h_plot
+
+
+```
+
+
+
+```{r, fig.width=16,fig.height=10}
+
+# ✅ שלב 1: התאמת עמודות והוספת עמודת מקור (Dataset)
+DeltaO2_data_clean <- DeltaO2_data %>%
+   dplyr::select(-Oscula) %>%
+   rename( Oscula = Unique_Code) %>%
+   dplyr::select(Species, Individual, Oscula, DateTime, Temp, O2_In, O2_Ex, Delta_O2) %>%
+  mutate(Dataset = "NW_Mediterranean")
+
+Eilat_clean_clean <- Eilat_clean %>%
+  rename(Species = Species_name) %>%
+   dplyr::select(Species , Individual, Oscula, DateTime, Temp, O2_In, O2_Ex, Delta_O2) %>%
+  mutate(
+    Species = as.character(Species),  # מייצרת עמודת Species (טקסט)
+    Oscula = as.character(Oscula),
+    Dataset = "Red_Sea_2018_2019"
+  )
+
+# ✅ שלב 2: איחוד שני הקבצים
+combined_forCV_data <- bind_rows(DeltaO2_data_clean, Eilat_clean_clean)
+
+
+# ✅ הוספת טור "Hour" לשעה עגולה
+combined_forCV_data <- combined_forCV_data %>%
+  mutate(Hour = lubridate::hour(DateTime))
+
+# ✅ חישוב סטטיסטיקות ממוצעות שעתיות לכל Species + Dataset
+CV_hourly_stats <- combined_forCV_data %>%
+  group_by(Species, Dataset, Hour) %>%
+  summarise(
+    n = sum(!is.na(Delta_O2)),  # מספר מדידות
+    mean_Delta_O2 = mean(Delta_O2, na.rm = TRUE),
+    median_Delta_O2 = median(Delta_O2, na.rm = TRUE),
+    sd_Delta_O2 = sd(Delta_O2, na.rm = TRUE),
+    SE_Delta_O2 = sd_Delta_O2 / sqrt(n),
+    CI95_Delta_O2 = 1.96 * SE_Delta_O2,
+    CV_Delta_O2 = (sd_Delta_O2 / abs(mean_Delta_O2)) * 100,
+    .groups = "drop"
+  )
+
+CV_hourly_all_plot<- ggplot(CV_hourly_stats, aes(x = Species, y = CV_Delta_O2, fill = Species)) +
+  geom_violin(scale = "width", alpha = 0.7, color = "black") +
+ # geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.5) +  # תיבה בפנים
+  #facet_wrap(~ Species, scales = "free_y", ncol = 4) +
+  scale_y_log10() +  # ציר Y לוגריתמי
+  scale_fill_manual(values = species_colors) +  # הצבעים שלך
+  labs(
+    x = "",
+    y = "CV (%)",
+    title = "",
+    fill = ""
+  ) +
+ theme(
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  legend.key = element_rect(fill = "white", color = NA, size = 20),
+  legend.title = element_text(size = 15),
+  legend.text = element_text(size = 20, face = "italic"),
+  legend.key.size = unit(1, "cm"),
+  legend.key.width = unit(1, "cm"),
+  legend.position = "bottom",
+  legend.justification = "center",
+  legend.box = "horizontal",
+  panel.background = element_blank(),
+  axis.line = element_line(colour = "black"),
+  strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+  axis.title = element_text(size = 20),  # ✅ כותרות צירים מוגדלות
+  axis.text.y = element_text(size = 18),  # ✅ טקסט בציר Y מוגדל
+  axis.text.x = element_text(size = 15 , face = "italic" ),  # ✅ טקסט בציר X מוגדל
+  strip.text = element_text(size = 15, face = "italic")
+)
+
+
+# ✅ שמירת הגרף
+ggsave("CV_hourly_all_plot.png",
+       plot = CV_hourly_all_plot, width = 16, height = 10, dpi = 300)
+
+
+
+CV_hourly_all_plot
+
+```
+
+```{r, fig.width=16,fig.height=10}
+
+# שלב 1: הוספת עמודת Light_darkness
+combined_Light_darkness_data <- combined_forCV_data %>%
+  mutate(
+    Light_darkness = if_else(Hour >= 7 & Hour < 20, "Light", "Darkness")
+  )
+
+# שלב 2: סינון רק מינים שיש להם גם Light וגם Darkness
+species_with_both <- combined_Light_darkness_data %>%
+  group_by(Species) %>%
+  summarise(n_groups = n_distinct(Light_darkness)) %>%
+  filter(n_groups == 2) %>%
+  pull(Species)
+
+combined_Light_darkness_data <- combined_Light_darkness_data %>%
+  filter(Species %in% species_with_both)
+
+summary_per_individual <- combined_Light_darkness_data %>%
+  group_by(Species, Individual, Light_darkness) %>%
+  summarise(
+    n = n(),
+    mean_Delta_O2 = mean(Delta_O2, na.rm = TRUE),
+    median_Delta_O2 = median(Delta_O2, na.rm = TRUE),
+    sd_Delta_O2 = sd(Delta_O2, na.rm = TRUE),
+    SE_Delta_O2 = sd_Delta_O2 / sqrt(n),
+    CI95_Delta_O2 = 1.96 * SE_Delta_O2,
+    CV_Delta_O2 = (sd_Delta_O2 / mean_Delta_O2) * 100,
+    .groups = "drop"
+  )
+
+
+# שלב 3: חישוב ממוצעים לכל Species ולכל Light_darkness
+mean_points <- summary_per_individual  %>%
+  rename(Delta_O2 = mean_Delta_O2) %>%
+  group_by(Species, Light_darkness) %>%
+  summarise(mean_Delta_O2 = mean(Delta_O2, na.rm = TRUE), .groups = "drop")
+
+# שלב 4: מבחן Wilcoxon לכל מין צריך להשלים!!!!!
+
+
+
+
+# חישוב מיקום הכוכביות (גובה מותאם לכל מין)
+stat_results <- stat_results %>%
+  mutate(y_pos = sapply(Species, function(sp) {
+    max(combined_Light_darkness_data$Delta_O2[combined_Light_darkness_data$Species == sp], na.rm = TRUE) * 1.05
+  }))
+
+# שלב 5: ציור Boxplot עם ממוצעים וכוכביות
+boxplot_with_stats <- ggplot( summary_per_individual, aes(x = Species, y = mean_Delta_O2, fill = Light_darkness)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, position = position_dodge(width = 0.75),
+               color = "black", size = 1.2) +  # ✅ קווי קופסה שחורים ועבים
+  geom_point(data = mean_points, aes(x = Species, y = mean_Delta_O2, color = Light_darkness, group = Light_darkness),
+             shape = 4, size = 4, stroke = 2, inherit.aes = FALSE, position = position_dodge(width = 0.75)) +  # ✅ X מדויקת לכל מצב
+  geom_text(data = stat_results, aes(x = Species, y = y_pos, label = significance),
+            inherit.aes = FALSE, size = 6) +  # ✅ כוכביות מובהקות
+  scale_fill_manual(values = c("Light" = "gold", "Darkness" = "gray40")) +
+  scale_color_manual(values = c("Light" = "black", "Darkness" = "black")) +  # ✅ X תמיד שחור
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05)), limits = c(0, 40)) +  # ✅ ציר Y מ-0 עד 40
+  labs(
+    x = "",
+    y = expression(Delta * O[2] * " (µmol L"^{-1}*")"),
+    fill = "",
+    color = ""
+  ) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "black"),
+    legend.key = element_rect(fill = "white", color = NA, size = 20),
+    legend.title = element_text(size = 15),
+    legend.text = element_text(size = 20, face = "italic"),
+    legend.key.size = unit(1, "cm"),
+    legend.key.width = unit(1, "cm"),
+    legend.position = "bottom",
+    legend.justification = "center",
+    legend.box = "horizontal",
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    strip.background = element_rect(fill = "white", color = "black", size = 1.5, linetype = "solid"),
+    axis.title = element_text(size = 20),
+    axis.text.y = element_text(size = 18),
+    axis.text.x = element_text(size = 15, face = "italic")
+  )
+
+
+# ✅ שמירת הגרף
+ggsave("boxplot_with_stats.png",
+       plot = boxplot_with_stats, width = 16, height = 10, dpi = 300)
+
+
+# הצגת הגרף
+boxplot_with_stats
+
+```
+
+##summary_table
+```{r, fig.width=16,fig.height=10}
+
+
+
+# פונקציה לחישוב CI95
+calc_ci95 <- function(x) {
+  if (length(x) < 2) return(NA_real_)
+  qt(0.975, df = length(x) - 1) * sd(x, na.rm=TRUE) / sqrt(length(x))
+}
+
+# רשימת הפרמטרים ושמותיהם להצגה
+params <- list(
+  Volume_ml        = "Volume (mL)",
+  osculum_area_sum = "SumOSA (mm²)",
+  Delta_O2_umol_L_mean_mean = "DeltaO2 (µmol L⁻¹)",
+  PR_L_hr          = "PR (L hr⁻¹)",
+  PRV_L_hr_ml      = "PRV (L hr⁻¹ mL⁻¹)",
+  Rind_umol_hr     = "Rind (µmol hr⁻¹)",
+  RV_umol_hr_ml    = "RV (µmol hr⁻¹ mL⁻¹)"
+)
+
+# אוספים summary לכל פרמטר
+summary_list <- lapply(names(params), function(param) {
+  Ind_summary_df %>%
+    group_by(Species, Dataset) %>%
+    summarise(
+      Mean   = mean(.data[[param]], na.rm=TRUE),
+      Median = median(.data[[param]], na.rm=TRUE),
+      SD     = sd(.data[[param]], na.rm=TRUE),
+      n      = sum(!is.na(.data[[param]])),
+      CI95   = calc_ci95(.data[[param]]),
+      CV     = ifelse(mean(.data[[param]], na.rm=TRUE) == 0, NA,
+                      100 * sd(.data[[param]], na.rm=TRUE) / abs(mean(.data[[param]], na.rm=TRUE))),
+      Min    = min(.data[[param]], na.rm=TRUE),
+      Max    = max(.data[[param]], na.rm=TRUE)
+    ) %>%
+    ungroup() %>%
+    mutate(Parameter = params[[param]])
+})
+
+
+# מאחדים הכל לטבלה אחת
+summary_table <- bind_rows(summary_list) %>%
+  relocate(Parameter, .after = Dataset)
+
+# סדר עמודות כמו בדוגמה
+summary_table <- summary_table %>%
+  dplyr::select(Species, Dataset, Parameter, Mean, Median, SD, n, CI95, CV, Min, Max)
+
+# מציגים דוגמית
+write.csv(summary_table,"summary_table.csv")
+
+```
+
+
+#טבלה לפרק שיטות 
+```{r, fig.width=16,fig.height=10}
+
+methods_table <- DeltaO2_combined %>%
+  mutate(
+    Year      = lubridate::year(DateTime),
+    Month_num = lubridate::month(DateTime)
+  ) %>%
+  group_by(Species_name, Dataset, Year) %>%
+  summarise(
+    n    = n_distinct(Individual),
+    Temp = paste0(round(min(Temp, na.rm=TRUE)), "-", round(max(Temp, na.rm=TRUE))),
+    Month = paste0(month.name[min(Month_num, na.rm=TRUE)],
+                   ifelse(min(Month_num, na.rm=TRUE) != max(Month_num, na.rm=TRUE), 
+                          paste0("-", month.name[max(Month_num, na.rm=TRUE)]), "")),
+    Depth = paste0(min(as.numeric(Depth_m), na.rm=TRUE), 
+                   ifelse(min(as.numeric(Depth_m), na.rm=TRUE) != max(as.numeric(Depth_m), na.rm=TRUE),
+                          paste0("-", max(as.numeric(Depth_m), na.rm=TRUE)), "")),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Location = ifelse(grepl("Mediterranean", Dataset), "NW Mediterranean", "Red Sea")
+  ) %>%
+  dplyr::select(
+    Species = Species_name, Dataset, Location, Year, Month, n, Temp, `Depth(m)` = Depth
+  )
+
+methods_table2 <- methods_table %>%
+  left_join(volume_ranges, by = c("Species", "Dataset"))
+
+write.csv(methods_table2, "C:/Users/ASUS/Google Drive/PHD/Chapter_3_Size/methods_table2.csv", row.names = FALSE)
+
+
+
+group_summary <- Osculum_Ind_summary_table %>%
+  group_by(Group) %>%
+  summarise(
+    n = sum(n_individuals, na.rm = TRUE),
+    mean_Volume = mean(Volume_ml, na.rm = TRUE),
+    mean_OFR = mean(avg_OFR_L_hr, na.rm = TRUE),
+    mean_Delta_O2 = mean(avg_Delta_O2_umol_L, na.rm = TRUE),
+    mean_PR = mean(avg_PR_L_hr, na.rm = TRUE),
+    mean_Rind = mean(avg_Rind_umol_hr, na.rm = TRUE),
+    mean_RV = mean(avg_RV_umol_hr_ml, na.rm = TRUE),
+    mean_SumOSA = mean(avg_osculum_area_mm2_sum, na.rm = TRUE),
+    n_species = n_distinct(Species),
+    PRv = mean_PR / mean_Volume,                # <--- זה PRv ל־Group
+    Rind_calc = mean_PR * mean_Delta_O2         # <--- זה Rind מחושב ל־Group
+  )
+
+
+# הוספת עמודות מחושבות לכל שורה, כדי שממוצע הקבוצה יחושב נכון (ולא לפי ממוצע-הממוצעים)
+SizeClass_Ind_summary_table <- SizeClass_Ind_summary_table %>%
+  mutate(
+    PRv = avg_PR_L_hr / avg_Volume_ml,                 # PRv לכל שורה
+    Rind_calc = avg_PR_L_hr * avg_Delta_O2_umol_L      # Rind מחושב לכל שורה
+  )
+
+# טבלת סיכום לפי Group
+sizeclass_group_summary <- SizeClass_Ind_summary_table %>%
+  group_by(Group) %>%
+  summarise(
+    n = sum(n_individuals, na.rm = TRUE),
+    mean_Volume = mean(avg_Volume_ml, na.rm = TRUE),
+    sd_Volume = sd(avg_Volume_ml, na.rm = TRUE),
+    mean_PR = mean(avg_PR_L_hr, na.rm = TRUE),
+    mean_DeltaO2 = mean(avg_Delta_O2_umol_L, na.rm = TRUE),
+    mean_OFR = mean(avg_OFR_L_hr, na.rm = TRUE),
+    mean_Rind = mean(avg_Rind_umol_hr, na.rm = TRUE),
+    mean_RV = mean(avg_RV_umol_hr_ml, na.rm = TRUE),
+    mean_SumOSA = mean(avg_osculum_area_mm2_sum, na.rm = TRUE),
+    mean_HMA_LMA = unique(HMA_LMA),
+    mean_PRv = mean(PRv, na.rm = TRUE),                  # ממוצע PRv לכל Group
+    mean_Rind_calc = mean(Rind_calc, na.rm = TRUE)        # ממוצע Rind מחושב לכל Group
+  ) %>%
+  arrange(Group)
+
+
+
+```
+
+```{r, fig.width=16,fig.height=10}
+
+Ind_summary_noRS2024 <- Ind_summary_df %>%
+  filter(Dataset != "Red_Sea_2024" | is.na(Dataset))
+
+# שמירת הטבלה ללא Red_Sea_2024
+readr::write_csv(
+  Ind_summary_noRS2024,
+  "C:/Users/ASUS/Google Drive/PHD/Chapter_2_F&R/Ind_summary_noRS2024.csv"
+)
+
+# בדיקה שהשמירה הצליחה
+file.exists("C:/Users/ASUS/Google Drive/PHD/Chapter_2_F&R/Ind_summary_noRS2024.csv")
+
+```
+
+###איורים למצגת 
+
+```{r, fig.width=7,fig.height=5}
+## ===== ΔO2 vs Volume – גרסת מצגת: HMA/LMA, לג'נד מוגדל ורקע שקוף =====
+
+# 1. צורות עבור HMA / LMA (מחליף זמנית את ההגדרה הקודמת)
+shape_values_updated <- c(
+  "HMA" = 19,  # עיגול ממולא
+  "LMA" = 1    # עיגול ריק
+)
+
+# 2. תוויות איטלקיות לשמות המינים בלג'נד (לפי הסדר ב-species_colors)
+species_labels_italics <- c(
+  expression(italic("C. cyathophora")),
+  expression(italic("C. siphonella")),
+  expression(italic("D. erythraeanus")),
+  expression(italic("N. rowi")),
+  expression(italic("S. clavatus")),
+  expression(italic("T. swinhoei")),
+  expression(italic("A. oroides")),
+  expression(italic("C. reniformis")),
+  expression(italic("D. avara")),
+  expression(italic("M. fistulifera"))
+)
+
+# 3. טבלה שבה Dataset = HMA_LMA (כדי להשתמש בפונקציה הקיימת)
+SizeClass_Ind_summary_table_HMA <- SizeClass_Ind_summary_table %>%
+  dplyr::mutate(Dataset = HMA_LMA)
+
+# 4. יצירת הגרף עם HMA/LMA, לג'נד באיטליקס ורקע שקוף
+DeltaO2_vs_Volume_plot_HMA_transparent <-
+  plot_power_law(
+    df   = SizeClass_Ind_summary_table_HMA,
+    xvar = "avg_Volume_ml",
+    yvar = "avg_Delta_O2_umol_L",
+    xlab = expression("Volume (mL)"),
+    ylab = expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")")
+  ) +
+  labs(shape = "Type") +
+  scale_color_manual(
+    values = species_colors,
+    breaks = names(species_colors),   # כדי שהסדר יתאים לצבעים
+    labels = species_labels_italics   # שמות המינים באיטליקס
+  ) +
+  theme(
+    panel.background  = element_rect(fill = NA, colour = NA),
+    plot.background   = element_rect(fill = NA, colour = NA),
+     axis.title.y=element_text(size=20),
+     axis.title.x=element_text(size=20),
+     axis.text.y = element_text(size=10),
+     axis.text.x = element_text(size=10),
+    legend.background = element_rect(fill = NA, colour = NA),
+    legend.key        = element_rect(fill = NA, colour = NA),
+    legend.text       = element_text(size = 15, face = "plain"),
+    legend.title      = element_text(size = 16)
+  )
+
+# הצגה על המסך
+DeltaO2_vs_Volume_plot_HMA_transparent
+
+# 5. שמירה לקובץ PNG עם רקע שקוף
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/DeltaO2_vs_Volume_plot_HMA_transparent.png",
+  plot   = DeltaO2_vs_Volume_plot_HMA_transparent,
+  width  = 7,
+  height = 5,
+  dpi    = 300,
+  bg     = "transparent"
+)
+
+
+```
+
+```{r, fig.width=7,fig.height=5}
+## ==== OFR vs Osculum area – גרסת מצגת: HMA/LMA, לג'נד מוגדל ורקע שקוף ==== 
+
+# 1. טבלה חדשה שבה Dataset מקבל את הערכים של HMA_LMA
+Osculum_summary_table_HMA <- Osculum_summary_table %>%
+  dplyr::mutate(Dataset = HMA_LMA)
+
+# 2. צורות חדשות: HMA עיגול מלא, LMA עיגול ריק
+shape_values_updated <- c(
+  "HMA" = 19,  # עיגול ממולא
+  "LMA" = 1    # עיגול ריק
+)
+
+# 3. תוויות איטלקיות לשמות המינים בלג'נד (אותו סדר כמו ב-species_colors)
+species_labels_italics <- c(
+  expression(italic("C. cyathophora")),
+  expression(italic("C. siphonella")),
+  expression(italic("D. erythraeanus")),
+  expression(italic("N. rowi")),
+  expression(italic("S. clavatus")),
+  expression(italic("T. swinhoei")),
+  expression(italic("A. oroides")),
+  expression(italic("C. reniformis")),
+  expression(italic("D. avara")),
+  expression(italic("M. fistulifera"))
+)
+
+# 4. גרף OFR מול שטח אוסקולה עם קבוצות HMA/LMA, לג'נד באיטליקס ורקע שקוף
+OFR_vs_OsculumArea_plot_HMA_transparent <-
+  plot_power_law(
+    df   = Osculum_summary_table_HMA,
+    xvar = "avg_osculum_area_mm2",
+    yvar = "avg_OFR_L_hr",
+    xlab = expression("Osculum area (mm"^2*")"),
+    ylab = expression("OFR (L "*h^{-1}*")")
+  ) +
+  labs(shape = "Type") +
+  scale_color_manual(
+    values = species_colors,
+    breaks = names(species_colors),   # אותו סדר כמו בצבעים
+    labels = species_labels_italics   # שמות המינים באיטליקס
+  ) +
+  theme(
+    panel.background  = element_rect(fill = NA, colour = NA),
+    plot.background   = element_rect(fill = NA, colour = NA),
+    axis.title.y      = element_text(size = 20),
+    axis.title.x      = element_text(size = 20),
+    axis.text.y       = element_text(size = 10),
+    axis.text.x       = element_text(size = 10),
+    legend.background = element_rect(fill = NA, colour = NA),
+    legend.key        = element_rect(fill = NA, colour = NA),
+    legend.text       = element_text(size = 15, face = "plain"),
+    legend.title      = element_text(size = 16)
+  )
+
+# הצגה על המסך
+OFR_vs_OsculumArea_plot_HMA_transparent
+
+# 5. שמירה לקובץ PNG עם רקע שקוף
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/OFR_vs_OsculumArea_plot_HMA_transparent.png",
+  plot   = OFR_vs_OsculumArea_plot_HMA_transparent,
+  width  = 7,
+  height = 5,
+  dpi    = 300,
+  bg     = "transparent"
+)
+
+
+```
+
+
+```{r, fig.width=7,fig.height=5}
+## ==== A.oroides – ΔO2 vs ΣOsculum Area (plot for presentation) ==== 
+
+# 1. טעינת נתוני A.oroides
+Aoroides_df <- NW_Ind_summary %>%
+  filter(Species == "A.oroides")
+
+# 2. Theme שקוף + מסגרת שחורה
+presentation_theme <- theme(
+  panel.background  = element_rect(fill = NA, colour = NA),  
+  plot.background   = element_rect(fill = NA, colour = NA),  
+  panel.border      = element_rect(fill = NA, colour = "black", linewidth = 0.8),  # ← מסגרת!
+  panel.grid        = element_blank(),
+  axis.line         = element_line(color = "black", linewidth = 0.6),
+  axis.title.x      = element_text(size = 20),
+  axis.title.y      = element_text(size = 20),
+  axis.text.x       = element_text(size = 12),
+  axis.text.y       = element_text(size = 12)
+)
+
+# 3. יצירת הגרף
+DeltaO2_vs_SumOSA_Aoroides_plot_transparent <-
+  ggplot(Aoroides_df, aes(
+    x = osculum_area_sum,
+    y = Delta_O2_umol_L_mean_mean
+  )) +
+  geom_point(
+    size = 4,
+    color = "#FF7F00",
+    shape = 17
+  ) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(
+    x = expression(Sigma~"Osculum area (mm"^2*")"),
+    y = expression(Delta*O[2]~"("*mu*"mol L"^{-1}*")")
+  ) +
+  presentation_theme
+
+# 4. הצגה
+DeltaO2_vs_SumOSA_Aoroides_plot_transparent
+
+# 5. שמירה עם רקע שקוף
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/Aoroides_DeltaO2_vs_SumOSA_transparent.png",
+  plot   = DeltaO2_vs_SumOSA_Aoroides_plot_transparent,
+  width  = 5,
+  height = 5,
+  dpi    = 300,
+  bg     = "transparent"
+)
+
+```
+
+
+```{r, fig.width=7,fig.height=5}
+
+## ==== A.oroides – ΔO₂ vs Volume (plot for presentation) ==== 
+
+# 1. סינון נתונים ל-A.oroides בלבד
+Aoroides_df <- NW_Ind_summary %>%
+  filter(Species == "A.oroides")
+
+# 2. Theme מוצגת עם רקע שקוף + מסגרת
+presentation_theme <- theme(
+  panel.background  = element_rect(fill = NA, colour = NA),
+  plot.background   = element_rect(fill = NA, colour = NA),
+  panel.border      = element_rect(fill = NA, colour = "black", linewidth = 0.8),
+  panel.grid        = element_blank(),
+  axis.line         = element_line(color = "black", linewidth = 0.6),
+  axis.title.x      = element_text(size = 20),
+  axis.title.y      = element_text(size = 20),
+  axis.text.x       = element_text(size = 12),
+  axis.text.y       = element_text(size = 12)
+)
+
+# 3. יצירת הגרף דרך הפונקציה שלך + הוספת theme למצגת
+DeltaO2_vs_Volume_Aoroides_plot <-
+  plot_powerlaw_single(
+    df    = Aoroides_df,
+    xvar  = "Volume_ml",
+    yvar  = "Delta_O2_umol_L_mean_mean",
+    xlab  = expression("Volume (mL)"),
+    ylab  = expression(Delta*O[2]~"("*mu*"mol L"^{-1}*")"),
+    fname = NULL   # לא שומר כאן — נשמור ידנית עם רקע שקוף
+  ) +
+  presentation_theme
+
+# 4. הצגת הגרף
+DeltaO2_vs_Volume_Aoroides_plot
+
+# 5. שמירה עם רקע שקוף (PNG)
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/Aoroides_DeltaO2_vs_Volume_transparent.png",
+  plot   = DeltaO2_vs_Volume_Aoroides_plot,
+  width  = 5,
+  height = 5,
+  dpi    = 300,
+  bg     = "transparent"
+)
+
+
+
+```
+
+
+
+```{r, fig.width=7,fig.height=5}
+
+library(tibble)
+library(dplyr)
+library(ggplot2)
+
+fr_table <- tribble(
+  ~group_volume, ~PR_L_hr, ~Rind_umol_hr, ~FR_L_umol, ~FR_L_mL,
+  ~DeltaO2_umol_L, ~inv_Delta_L_umol, ~inv_Delta_L_mL,
+  "<100",   6,  84, 0.071, 3.17, 16, 0.0625, 2.79,
+  "100–200",14, 264,0.053, 2.37, 18, 0.0556, 2.48,
+  "200–400",19, 336,0.057, 2.54, 15, 0.0667, 2.98,
+  ">400",   23,366,0.063, 2.81, 16, 0.0625, 2.79
+) %>%
+  mutate(
+    group_volume = factor(
+      group_volume,
+      levels = c("<100","100–200","200–400",">400")
+    )
+  )
+
+bottle_green <- "#0F4C45"
+
+presentation_theme <- theme(
+  panel.background  = element_rect(fill = NA, colour = "black"),
+  plot.background   = element_rect(fill = NA, colour = NA),
+  panel.grid        = element_blank(),
+  axis.line         = element_line(colour = "black"),
+  axis.title        = element_text(size = 18),
+  axis.text         = element_text(size = 12),
+  legend.position   = "none"
+)
+
+# === גרסה עם ציר Y מוגדל ===
+FR_plot_scaled <- ggplot(fr_table,
+    aes(x = group_volume, y = FR_L_umol, group = 1)) +
+ # geom_line(colour = bottle_green, linewidth = 1) +
+  geom_point(colour = bottle_green, size = 5) +
+  coord_cartesian(ylim = c(0, 0.10)) +
+  labs(
+    x = "Volume group (mL)",
+    y = expression(F/R~"(L"~mu*mol~O[2]^{-1}*")")
+  ) +
+  presentation_theme
+
+FR_plot_scaled
+
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/FR_ratio_scaled.png",
+  FR_plot_scaled, width = 5, height = 4, dpi = 300, bg = "transparent"
+)
+
+# טבלה שכבר קיימת אצלך: fr_table
+
+bottle_green <- "#0F4C45"
+
+presentation_theme <- theme(
+  panel.background  = element_rect(fill = NA, colour = "black"),
+  plot.background   = element_rect(fill = NA, colour = NA),
+  panel.grid        = element_blank(),
+  axis.line         = element_line(colour = "black"),
+  axis.title        = element_text(size = 18),
+  axis.text         = element_text(size = 12),
+  legend.position   = "none"
+)
+
+FR_mL_plot <- ggplot(fr_table,
+                  aes(x = group_volume, y = FR_L_mL, group = 1)) +
+  #geom_line(colour = bottle_green, linewidth = 1.2) +
+  geom_point(colour = bottle_green, size = 5) +
+  coord_cartesian(ylim = c(0, 4)) +
+  labs(
+    x = "Volume group (mL)",
+    y = expression(F/R~"(L"~mL~O[2]^{-1}*")")
+  ) +
+  presentation_theme
+
+FR_mL_plot
+
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/FR_ratio_mL_by_volume.png",
+  FR_mL_plot, width = 5, height = 4, dpi = 300, bg = "transparent"
+)
+
+```
+
+```{r SizeClass_Figures_setup, include=FALSE}
+# --- Panel - SizeClass_Ind_summary_table ---
+
+library(dplyr)
+library(ggplot2)
+
+# 1. צבעים לכל מין
+species_colors <-  c(
+  "C.cyathophora"   = "#BAD6D3",
+  "C.siphonella"    = "#939ECC",
+  "D.erythraeanus"  = "#A65628",
+  "N.rowi"          = "#377EB8",
+  "S.clavatus"      = "#EEB422",
+  "T.swinhoei"      = "#8B2323",
+  "A.oroides"       = "#FF7F00",
+  "C.reniformis"    = "#BD9D80",
+  "D.avara"         = "#A680BD",
+  "M.fistulifera"   = "#E41A1C"
+)
+
+# 2. צורות: HMA = עיגול ממולא, LMA = עיגול ריק
+shape_values_HMA_LMA <- c(
+  "HMA" = 19,  # עיגול מלא
+  "LMA" = 1    # עיגול ריק
+)
+
+# 3. עמודות מחושבות מראש + fill_species
+SizeClass_Ind_summary_table <- SizeClass_Ind_summary_table %>%
+  mutate(
+    fill_species = ifelse(
+      HMA_LMA == "HMA",
+      species_colors[Species],
+      "white"
+    ),
+    PRV = avg_PR_L_hr / avg_Volume_ml,
+    RV  = avg_Rind_umol_hr / avg_Volume_ml
+  )
+
+# 4. Theme אחיד עם רקע שקוף
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  panel.grid = element_blank(),
+  panel.border = element_rect(fill = NA, color = "black"),
+  axis.line = element_line(color = "black"),
+  axis.title = element_text(size = 15),
+  axis.text  = element_text(size = 20),
+  legend.text  = element_text(size = 13, face = "plain"),
+  legend.title = element_text(size = 14),
+  legend.key   = element_blank(),
+  legend.background = element_blank(),
+  legend.position   = "right",
+  # רקע שקוף
+  plot.background = element_rect(fill = "transparent", color = NA)
+)
+
+# 5. פונקציה ליצירת גרף log-log עם fill + קו מגמה
+plot_power_law <- function(df, xvar, yvar, xlab, ylab) {
+
+  data_valid <- df %>%
+    dplyr::filter(
+      !is.na(.data[[xvar]]),
+      !is.na(.data[[yvar]]),
+      .data[[xvar]] > 0,
+      .data[[yvar]] > 0
+    )
+
+  formula_str <- paste0("log(", yvar, ") ~ log(", xvar, ")")
+  model <- lm(as.formula(formula_str), data = data_valid)
+  sm <- summary(model)
+
+  a    <- exp(coef(model)[1])
+  b    <- coef(model)[2]
+  r2   <- sm$r.squared
+  pval <- sm$coefficients[2, "Pr(>|t|)"]
+
+  trend_line <- NULL
+  eq_text    <- NULL
+
+  if (pval < 0.05) {
+    x_vals <- seq(min(data_valid[[xvar]]), max(data_valid[[xvar]]), length.out = 100)
+    y_vals <- a * x_vals^b
+    trend_line <- data.frame(x = x_vals, y = y_vals)
+
+    eq_text <- paste0(
+      "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+      "*','~~italic(R)^2 == ", signif(r2, 3)
+    )
+  }
+
+  p <- ggplot(df, aes_string(
+    x     = xvar,
+    y     = yvar,
+    color = "Species",
+    shape = "HMA_LMA",
+    fill  = "fill_species"
+  )) +
+    geom_point(size = 5, stroke = 1.5) +
+    scale_color_manual(values = species_colors) +
+    scale_shape_manual(values = shape_values_HMA_LMA) +
+    scale_fill_identity() +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(
+      x = xlab,
+      y = ylab,
+      color = "Species",
+      shape = "Microbial type",
+      fill  = "Type"
+    ) +
+    my_plot_theme +
+    guides(
+      # שמות המינים בנטוי
+      color = guide_legend(
+        title = "Species",
+        label.theme = element_text(size = 13, face = "italic")
+      ),
+      # HMA / LMA לא נטוי
+      shape = guide_legend(
+        title = "Type",
+        label.theme = element_text(size = 13, face = "plain")
+      )
+    )
+
+  if (!is.null(trend_line)) {
+    p <- p +
+      geom_line(
+        data = trend_line,
+        aes(x = x, y = y),
+        inherit.aes = FALSE,
+        color = "black",
+        linetype = "dashed",
+        linewidth = 1
+      ) +
+      annotate(
+        "text",
+        x     = min(data_valid[[xvar]]) * 1.4,
+        y     = max(data_valid[[yvar]]) * 0.65,
+        label = eq_text,
+        parse = TRUE,
+        hjust = 0,
+        vjust = -0.7,
+        size  = 5
+      )
+  }
+
+  return(p)
+}
+
+# 6. יצירת האיורים למצגת
+
+# PR מול נפח
+PR_vs_Volume_plot <- plot_power_law(
+  df   = SizeClass_Ind_summary_table,
+  xvar = "avg_Volume_ml",
+  yvar = "avg_PR_L_hr",
+  xlab = expression("Volume (mL)"),
+  ylab = expression("PR (L hr"^{-1}*")")
+)
+
+# PRv (קצב שאיבה ספציפי) מול נפח
+PRV_vs_Volume_plot <- plot_power_law(
+  df   = SizeClass_Ind_summary_table,
+  xvar = "avg_Volume_ml",
+  yvar = "PRV",
+  xlab = expression("Volume (mL)"),
+  ylab = expression("PRv (L hr"^{-1}~mL^{-1}*")")
+)
+
+# נשימה מוחלטת מול נפח
+Rind_vs_Volume_plot <- plot_power_law(
+  df   = SizeClass_Ind_summary_table,
+  xvar = "avg_Volume_ml",
+  yvar = "avg_Rind_umol_hr",
+  xlab = expression("Volume (mL)"),
+  ylab = expression("Respiration (μmol O"[2]*" hr"^{-1}*")")
+)
+
+# נשימה ספציפית מול נפח
+RV_vs_Volume_plot <- plot_power_law(
+  df   = SizeClass_Ind_summary_table,
+  xvar = "avg_Volume_ml",
+  yvar = "RV",
+  xlab = expression("Volume (mL)"),
+  ylab = expression("Specific respiration (μmol O"[2]*" hr"^{-1}~mL^{-1}*")")
+)
+
+# אפשר להדפיס כדי לראות ברצף ב-Rmd:
+PR_vs_Volume_plot
+PRV_vs_Volume_plot
+Rind_vs_Volume_plot
+RV_vs_Volume_plot
+
+# 7. שמירה לקבצים עם רקע שקוף
+ggsave("C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/Fig_PR_vs_Volume_presentation.png",   PR_vs_Volume_plot,
+       width = 7, height = 5, dpi = 600, bg = "transparent")
+ggsave("C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/Fig_PRV_vs_Volume_presentation.png",  PRV_vs_Volume_plot,
+       width = 7, height = 5, dpi = 600, bg = "transparent")
+ggsave("C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/Fig_Rind_vs_Volume_presentation.png", Rind_vs_Volume_plot,
+       width = 7, height = 5, dpi = 600, bg = "transparent")
+ggsave("C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/Fig_RV_vs_Volume_presentation.png",   RV_vs_Volume_plot,
+       width = 7, height = 5, dpi = 600, bg = "transparent")
+
+```
+
+
+```{r, fig.width=7,fig.height=5}
+# --- Panel - Osculum_Ind_summary_table ---
+
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(patchwork)
+
+# 1. הגדרת צבעים לכל מין
+species_colors <-  c(
+  "C.cyathophora"   = "#BAD6D3",
+  "C.siphonella"    = "#939ECC",
+  "D.erythraeanus"  = "#A65628",
+  "N.rowi"          = "#377EB8",
+  "S.clavatus"      = "#EEB422",
+  "T.swinhoei"      = "#8B2323",
+  "A.oroides"       = "#FF7F00",
+  "C.reniformis"    = "#BD9D80",
+  "D.avara"         = "#A680BD",
+  "M.fistulifera"   = "#E41A1C"
+)
+
+# 2. צורות: HMA = עיגול ממולא, LMA = עיגול ריק
+shape_values_HMA_LMA <- c(
+  "HMA" = 19,  # עיגול מלא
+  "LMA" = 1    # עיגול ריק
+)
+
+# 3. fill לפי HMA/LMA
+Osculum_Ind_summary_table <- Osculum_Ind_summary_table %>%
+  mutate(
+    fill_species = ifelse(
+      HMA_LMA == "HMA",
+      species_colors[Species],
+      "white"
+    )
+  )
+
+# 4. Theme משותף עם רקע שקוף
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  panel.grid       = element_blank(),
+  panel.border     = element_rect(fill = NA, color = "black"),
+  axis.line        = element_line(color = "black"),
+  axis.title       = element_text(size = 25),
+  axis.text        = element_text(size = 20),
+  legend.text      = element_text(size = 13, face = "plain"),
+  legend.title     = element_text(size = 14),
+  legend.key       = element_blank(),
+  legend.background = element_blank(),
+  legend.position   = "right",
+  plot.background   = element_rect(fill = "transparent", color = NA) # רקע שקוף
+)
+
+# 5. פונקציה ליצירת גרף log-log עם קו מגמה + fill species
+plot_power_law <- function(df, xvar, yvar, xlab, ylab) {
+
+  data_valid <- df %>%
+    dplyr::filter(
+      !is.na(.data[[xvar]]),
+      !is.na(.data[[yvar]]),
+      .data[[xvar]] > 0,
+      .data[[yvar]] > 0
+    )
+
+  formula_str <- paste0("log(", yvar, ") ~ log(", xvar, ")")
+  model <- lm(as.formula(formula_str), data = data_valid)
+  sm    <- summary(model)
+
+  a    <- exp(coef(model)[1])
+  b    <- coef(model)[2]
+  r2   <- sm$r.squared
+  pval <- sm$coefficients[2, "Pr(>|t|)"]
+
+  trend_line <- NULL
+  eq_text    <- NULL
+
+  if (pval < 0.05) {
+    x_vals <- seq(min(data_valid[[xvar]]), max(data_valid[[xvar]]), length.out = 100)
+    y_vals <- a * x_vals^b
+    trend_line <- data.frame(x = x_vals, y = y_vals)
+
+    eq_text <- paste0(
+      "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+      "*','~~italic(R)^2 == ", signif(r2, 3)
+    )
+  }
+
+  p <- ggplot(df, aes_string(
+    x     = xvar,
+    y     = yvar,
+    color = "Species",
+    shape = "HMA_LMA",
+    fill  = "fill_species"
+  )) +
+    geom_point(size = 5, stroke = 1.5) +
+    scale_color_manual(values = species_colors) +
+    scale_shape_manual(values = shape_values_HMA_LMA) +
+    scale_fill_identity() +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(
+      x = xlab,
+      y = ylab,
+      color = "Species",
+      shape = "Microbial type",
+      fill  = "Type"
+    ) +
+    my_plot_theme +
+    guides(
+      # שמות המינים בנטוי
+      color = guide_legend(
+        title = "Species",
+        label.theme = element_text(size = 13, face = "italic")
+      ),
+      # HMA/LMA לא נטוי
+      shape = guide_legend(
+        title = "Type",
+        label.theme = element_text(size = 13, face = "plain")
+      )
+    )
+
+  if (!is.null(trend_line)) {
+    p <- p +
+      geom_line(
+        data = trend_line,
+        aes(x = x, y = y),
+        inherit.aes = FALSE,
+        color = "black",
+        linetype = "dashed",
+        linewidth = 1
+      ) +
+      annotate(
+        "text",
+        x     = min(data_valid[[xvar]]) * 1.4,
+        y     = max(data_valid[[yvar]]) * 0.65,
+        label = eq_text,
+        parse = TRUE,
+        hjust = 0,
+        vjust = -0.7,
+        size  = 5
+      )
+  }
+
+  return(p)
+}
+
+# --- 6 איורים בודדים ---
+
+DeltaO2_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "avg_Delta_O2_umol_L",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")")
+)
+
+PR_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "avg_PR_L_hr",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression("PR (L hr"^{-1}*")")
+)
+
+Rind_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "avg_Rind_umol_hr",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression("R"["ind"]~ " ("*mu*"mol hr"^{-1}*")")
+)
+
+RsumOSA_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "RsumOSA",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression(R[sum(OSA)] ~ "(" * mu * "mol hr"^{-1}~mm^{-2}*")")
+)
+
+PRsumOSA_vs_SumOSA_plot <- plot_power_law(
+  df    = Osculum_Ind_summary_table,
+  xvar  = "avg_osculum_area_mm2_sum",
+  yvar  = "PRsumOSA",
+  xlab  = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab  = expression(PR[sum(OSA)] ~ "(" * "L hr"^{-1}~mm^{-2} * ")")
+)
+
+
+ggsave("C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/PR_vs_SumOSA_plot.png",  PR_vs_SumOSA_plot,
+       width = 7, height = 5, dpi = 600, bg = "transparent")
+
+
+```
+
+
+```{r, fig.width=7,fig.height=5}
+
+library(dplyr)
+library(ggplot2)
+
+# --- Theme למצגת עם רקע שקוף ---
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  panel.grid       = element_blank(),
+  panel.border     = element_rect(fill = NA, color = "black"),
+  axis.line        = element_line(color = "black"),
+  axis.title       = element_text(size = 25),
+  axis.text        = element_text(size = 20),
+  legend.position  = "none",
+  plot.background  = element_rect(fill = "transparent", color = NA)  # רקע שקוף
+)
+
+# --- פונקציה לציור איור log-log עם קו מגמה (למין אחד) ---
+plot_powerlaw_single <- function(df, xvar, yvar, xlab, ylab,
+                                 color = "#FF7F00", shape = 17,
+                                 fname = NULL) {
+
+  data_valid <- df %>%
+    dplyr::filter(
+      !is.na(.data[[xvar]]),
+      !is.na(.data[[yvar]]),
+      .data[[xvar]] > 0,
+      .data[[yvar]] > 0
+    )
+
+  formula_str <- paste0("log(", yvar, ") ~ log(", xvar, ")")
+  model <- lm(as.formula(formula_str), data = data_valid)
+  sm    <- summary(model)
+
+  a    <- exp(coef(model)[1])
+  b    <- coef(model)[2]
+  r2   <- sm$r.squared
+  pval <- sm$coefficients[2, "Pr(>|t|)"]
+
+  trend_line <- NULL
+  eq_text    <- NULL
+
+  if (!is.na(pval) && pval < 0.05) {
+    x_vals <- seq(min(data_valid[[xvar]]), max(data_valid[[xvar]]), length.out = 100)
+    y_vals <- a * x_vals^b
+    trend_line <- data.frame(x = x_vals, y = y_vals)
+
+    eq_text <- paste0(
+      "italic(y) == ", signif(a, 3), " * x^", signif(b, 3),
+      "*','~~italic(R)^2 == ", signif(r2, 3)
+    )
+  }
+
+  p <- ggplot(df, aes_string(x = xvar, y = yvar)) +
+    geom_point(size = 4, color = color, shape = shape) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = xlab, y = ylab) +
+    my_plot_theme
+
+  if (!is.null(trend_line)) {
+    p <- p +
+      geom_line(
+        data = trend_line,
+        aes(x = x, y = y),
+        inherit.aes = FALSE,
+        color = "black",
+        linetype = "dashed",
+        linewidth = 1
+      ) +
+      annotate(
+        "text",
+        x     = min(data_valid[[xvar]]) * 1.5,
+        y     = max(data_valid[[yvar]]) * 0.75,
+        label = eq_text,
+        parse = TRUE,
+        hjust = 0,
+        vjust = -0.7,
+        size  = 5
+      )
+  }
+
+  # שמירה לקובץ (אם ביקשנו שם קובץ)
+  if (!is.null(fname)) {
+    ggsave(
+      filename = fname,
+      plot     = p,
+      width    = 5,
+      height   = 5,
+      dpi      = 600,
+      bg       = "transparent"   # רקע שקוף בקובץ
+    )
+  }
+
+  return(p)
+}
+
+# --- 1. עמודות מחושבות ל-A. oroides ---
+Aoroides_df <- Aoroides_df %>%
+  mutate(
+    RsumOSA  = Rind_umol_hr / osculum_area_sum,
+    PRsumOSA = PR_L_hr      / osculum_area_sum
+  )
+
+# נתיב בסיס לתיקיית הכנס
+base_dir <- "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/"
+
+# --- 2. ציור ושמירה של האיורים ---
+
+DeltaO2_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "Delta_O2_umol_L_mean_mean",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")"),
+  fname = file.path(base_dir, "DeltaO2_vs_SumOSA_Aoroides_plot.png")
+)
+
+PR_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "PR_L_hr",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression("PR (L hr"^{-1}*")"),
+  fname = file.path(base_dir, "PR_vs_SumOSA_Aoroides_plot.png")
+)
+
+Rind_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "Rind_umol_hr",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression("R"["ind"]~ "("*mu*"mol hr"^{-1}*")"),
+  fname = file.path(base_dir, "Rind_vs_SumOSA_Aoroides_plot.png")
+)
+
+RsumOSA_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "RsumOSA",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression(R[sum(OSA)] ~ "(" * mu * "mol hr"^{-1}~mm^{-2}*")"),
+  fname = file.path(base_dir, "RsumOSA_vs_SumOSA_Aoroides_plot.png")
+)
+
+PRsumOSA_vs_SumOSA_Aoroides_panel <- plot_powerlaw_single(
+  Aoroides_df,
+  xvar = "osculum_area_sum",
+  yvar = "PRsumOSA",
+  xlab = expression(Sigma~"Osculum area (mm"^2*")"),
+  ylab = expression(PR[sum(OSA)] ~ "(" * "L hr"^{-1}~mm^{-2} * ")"),
+  fname = file.path(base_dir, "PRsumOSA_vs_SumOSA_Aoroides_plot.png")
+)
+
+
+
+```
+
+
+```{r, fig.width=7,fig.height=5}
+library(dplyr)
+library(ggplot2)
+
+# --- Theme למצגת עם רקע שקוף ---
+my_plot_theme <- theme(
+  panel.background = element_blank(),
+  plot.background  = element_rect(fill = "transparent", color = NA),
+  panel.grid       = element_blank(),
+  panel.border     = element_rect(fill = NA, color = "black"),
+  axis.line        = element_line(color = "black"),
+ axis.title       = element_text(size = 25),
+  axis.text        = element_text(size = 20),
+  legend.position  = "none"
+)
+
+# --- עמודות מחושבות ---
+NW_Ind_summary <- NW_Ind_summary %>%
+  mutate(
+    RV_umol_hr_ml = Rind_umol_hr / Volume_ml,
+    PRV_L_hr_ml   = PR_L_hr / Volume_ml
+  )
+
+# --- פונקציה פשוטה לגרף log-log עם קו מגמה רק אם מובהק ---
+plot_power_law_simple <- function(df, xvar, yvar, xlab, ylab,
+                                  point_color = "#FF7F00") {
+  
+  data_valid <- df %>%
+    filter(!is.na(.data[[xvar]]), !is.na(.data[[yvar]]),
+           .data[[xvar]] > 0, .data[[yvar]] > 0)
+  
+  model <- lm(as.formula(paste0("log(", yvar, ") ~ log(", xvar, ")")),
+              data = data_valid)
+  sm <- summary(model)
+  a    <- exp(coef(model)[1])
+  b    <- coef(model)[2]
+  r2   <- sm$r.squared
+  pval <- sm$coefficients[2, "Pr(>|t|)"]
+  
+  p <- ggplot(data_valid, aes_string(x = xvar, y = yvar)) +
+    geom_point(size = 5, color = point_color, shape = 17) +
+    scale_x_log10() +
+    scale_y_log10() +
+    labs(x = xlab, y = ylab) +
+    my_plot_theme
+  
+  if (pval < 0.05) {
+    x_vals <- seq(min(data_valid[[xvar]]), 
+                  max(data_valid[[xvar]]), 
+                  length.out = 100)
+    y_vals <- a * x_vals^b
+    trend_line <- data.frame(x = x_vals, y = y_vals)
+    
+    eq_text <- paste0(
+      "italic(y) == ", signif(a, 3), 
+      " * x^", signif(b, 3),
+      "*','~~italic(R)^2 == ", signif(r2, 3)
+    )
+    
+    p <- p +
+      geom_line(data = trend_line, aes(x = x, y = y),
+                inherit.aes = FALSE,
+                color = "black", linetype = "dashed", linewidth = 1) +
+      annotate(
+        "text",
+        x     = min(data_valid[[xvar]]) * 1.3,
+        y     = max(data_valid[[yvar]]) * 0.95,  # 👈 היה 0.7, עכשיו כמעט למעלה
+        label = eq_text,
+        parse = TRUE,
+        hjust = 0,
+        vjust = 1,
+        size  = 5
+      )
+  }
+  
+  return(p)
+}
+
+# --- נתיב שמירה בסיסי ---
+save_path <- "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/"
+
+# --- יצירת כל האיורים ---
+plots <- list(
+  Delta_O2_Volume_ml_plot = plot_power_law_simple(
+    NW_Ind_summary, "Volume_ml", "Delta_O2_umol_L_mean_mean",
+    expression("Volume (mL)"),
+    expression(Delta*O[2]*" ("*mu*"mol L"^{-1}*")")
+  ),
+  
+  PR_Volume_ml_plot = plot_power_law_simple(
+    NW_Ind_summary, "Volume_ml", "PR_L_hr",
+    expression("Volume (mL)"),
+    expression("PR (L hr"^{-1}*")")
+  ),
+  
+  Rind_Volume_ml_plot = plot_power_law_simple(
+    NW_Ind_summary, "Volume_ml", "Rind_umol_hr",
+    expression("Volume (mL)"),
+    expression(R[ind]~ "(" * mu * "mol hr"^{-1} * ")")
+  ),
+  
+  RV_Volume_ml_plot = plot_power_law_simple(
+    NW_Ind_summary, "Volume_ml", "RV_umol_hr_ml",
+    expression("Volume (mL)"),
+    expression(R[V]~"(" * mu * "mol hr"^{-1}~mL^{-1} * ")")
+  ),
+  
+  PRV_Volume_ml_plot = plot_power_law_simple(
+    NW_Ind_summary, "Volume_ml", "PRV_L_hr_ml",
+    expression("Volume (mL)"),
+    expression(PR[V]~"(" * "L hr"^{-1}~mL^{-1} * ")")
+  ),
+  
+  osculum_area_sum_Volume_ml_plot = plot_power_law_simple(
+    NW_Ind_summary, "Volume_ml", "osculum_area_sum",
+    expression("Volume (mL)"),
+    expression(Sigma~"Osculum area (mm"^2*")")
+  )
+)
+
+# --- שמירה עם רקע שקוף ---
+for (n in names(plots)) {
+  ggsave(
+    filename = paste0(save_path, n, ".png"),
+    plot     = plots[[n]],
+    width    = 5, height = 5, dpi = 600,
+    bg       = "transparent"
+  )
+}
+
+```
+
+```{r, fig.width=7,fig.height=5}
+
+
+library(dplyr)
+
+Ind_summary_Size_Class <- Ind_summary_df %>%
+  # 1️⃣ סינון רק נתונים עם Size_Class
+  filter(!is.na(Size_Class)) %>%
+
+  # 2️⃣ לחשב F/R בשתי שיטות + 3️⃣ לחשב 1/ΔO₂
+  mutate(
+    FR_L_umol = PR_L_hr / Rind_umol_hr,
+    FR_L_ml   = FR_L_umol * 44.64788732,
+    Inv_Delta_O2 = 1 / Delta_O2_umol_L_mean_mean
+  )
+
+
+
+# קודם מנקים ומחשבים את שלושת הטורים החדשים
+Ind_summary_clean <- Ind_summary_df %>%
+  filter(!is.na(Size_Class)) %>%
+  mutate(
+    FR_L_umol = PR_L_hr / Rind_umol_hr,
+    FR_L_ml   = FR_L_umol * 44.64788732,
+    Inv_Delta_O2 = 1 / Delta_O2_umol_L_mean_mean
+  )
+
+# פונקציה קטנה לחישובי ממוצע + SE + CI
+summary_stats <- function(x) {
+  x <- x[!is.na(x)]
+  n  <- length(x)
+  mean_x <- mean(x)
+  sd_x   <- sd(x)
+  se_x   <- sd_x / sqrt(n)
+  ci95   <- 1.96 * se_x
+  data.frame(
+    mean = mean_x,
+    n = n,
+    sd = sd_x,
+    se = se_x,
+    ci95 = ci95
+  )
+}
+
+# חישוב לכל אחד משלושת המשתנים לפי Size_Class
+SizeClass_summary <- Ind_summary_clean %>%
+  group_by(Size_Class) %>%
+  summarise(
+    FR_L_umol_summary = list(summary_stats(FR_L_umol)),
+    FR_L_ml_summary   = list(summary_stats(FR_L_ml)),
+    Inv_DeltaO2_summary = list(summary_stats(Inv_Delta_O2))
+  ) %>%
+  tidyr::unnest_wider(FR_L_umol_summary, names_sep = "_FRumol") %>%
+  tidyr::unnest_wider(FR_L_ml_summary, names_sep = "_FRml") %>%
+  tidyr::unnest_wider(Inv_DeltaO2_summary, names_sep = "_InvD")
+
+library(dplyr)
+library(ggplot2)
+
+# אם Size_Class 1–4 תואם לקטגוריות הנפח:
+volume_labels <- c("<100", "100–200", "200–400", ">400")
+
+plot_df <- SizeClass_summary %>%
+  mutate(
+    group_volume = factor(Size_Class,
+                          levels = 1:4,
+                          labels = volume_labels)
+  )
+
+
+bottle_green <- "#0F4C45"
+
+presentation_theme <- theme(
+  panel.background  = element_rect(fill = NA, colour = "black"),
+  plot.background   = element_rect(fill = NA, colour = NA),
+  panel.grid        = element_blank(),
+  axis.line         = element_line(colour = "black"),
+  axis.title        = element_text(size = 18),
+  axis.text         = element_text(size = 12),
+  legend.position   = "none"
+)
+
+
+
+FR_plot_scaled <- ggplot(
+  plot_df,
+  aes(x = group_volume,
+      y = FR_L_umol_summary_FRumolmean)
+) +
+  geom_point(colour = bottle_green, size = 5) +
+  geom_errorbar(
+    aes(
+      ymin = FR_L_umol_summary_FRumolmean - FR_L_umol_summary_FRumolci95,
+      ymax = FR_L_umol_summary_FRumolmean + FR_L_umol_summary_FRumolci95
+    ),
+    width = 0.1,
+    colour = bottle_green
+  ) +
+  coord_cartesian(ylim = c(0, 0.10)) +
+  labs(
+    x = "Volume group (mL)",
+    y = expression(F/R~"(L"~mu*mol~O[2]^{-1}*")")
+  ) +
+  presentation_theme
+
+FR_plot_scaled
+
+
+FR_mL_plot <- ggplot(
+  plot_df,
+  aes(x = group_volume,
+      y = FR_L_ml_summary_FRmlmean)
+) +
+  geom_point(colour = bottle_green, size = 5) +
+  geom_errorbar(
+    aes(
+      ymin = FR_L_ml_summary_FRmlmean - FR_L_ml_summary_FRmlci95,
+      ymax = FR_L_ml_summary_FRmlmean + FR_L_ml_summary_FRmlci95
+    ),
+    width = 0.1,
+    colour = bottle_green
+  ) +
+  coord_cartesian(ylim = c(0, 10)) +
+  labs(
+    x = "Volume group (mL)",
+    y = expression(F/R~"(L"~mL~O[2]^{-1}*")")
+  ) +
+  presentation_theme
+
+FR_mL_plot
+
+
+
+ggsave("C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/FR_mL_plot.png",  FR_mL_plot,width = 7, height = 5, dpi = 600, bg = "transparent")
+
+
+```
+
+```{r, fig.width=10,fig.height=7}
+
+Volume_sponge_Data <- read.csv(
+  "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/Volume_pumping_Weisz_Ludeman_Morganti.csv",
+  stringsAsFactors = FALSE
+)
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+
+Volume_sponge_Data <- Volume_sponge_Data %>%
+  mutate(Region = case_when(
+    Source == "Morganti"   ~ "Mediterranean Sea",
+    Source == "Weisz"      ~ "Caribbean",
+    Source == "This study" ~ "Red Sea",
+    TRUE ~ NA_character_
+  ))
+
+Volume_sponge_Data <- Volume_sponge_Data %>%
+  mutate(
+    Region = factor(
+      Region,
+      levels = c("Mediterranean Sea", "Red Sea", "Caribbean")
+    )
+  )
+
+
+
+bottle_green <- "#3E7F6B"
+lma_beige    <- "#EFE8DA"
+
+Volume_boxplot_by_sea<- ggplot(Volume_sponge_Data, aes(x = HMA_LMA, y = volume_mL , fill = HMA_LMA)) +
+  geom_boxplot(color = "black", linewidth = 0.7, outlier.shape = NA) +
+ # stat_summary(fun = mean, geom = "point", shape = 4, size = 3, color = "black") +
+  facet_wrap(~Region, nrow = 1) +
+  scale_y_log10(name = "Volume (mL)") +
+  scale_fill_manual(values = c(HMA = bottle_green, LMA = lma_beige)) +
+  labs(x = NULL,fill = NULL) +
+  theme_classic(base_size = 16) +
+   theme(
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    plot.background  = element_rect(fill = "transparent", colour = NA),
+
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+
+    strip.background = element_rect(fill = "transparent", color = "black", linewidth = 1),
+    strip.text = element_text(color = "black", face = "bold"),
+
+    axis.line = element_blank(),
+
+    ## ✨ זה החלק החדש – legend שקוף ✨
+    legend.background = element_rect(fill = "transparent", colour = NA),
+    legend.key = element_rect(fill = "transparent", colour = NA)
+  )
+Volume_boxplot_by_sea
+
+
+ggsave(
+  "C:/Users/ASUS/Google Drive/PHD/Zoology Conference 2025/Volume_boxplot_by_sea.png",
+  Volume_boxplot_by_sea,
+  width = 10,
+  height = 7,
+  dpi = 300,
+  bg = "transparent"
+)
+
+
+
+n_by_region_HMA <- Volume_sponge_Data %>%
+  group_by(Region, HMA_LMA) %>%
+  summarise(
+    n = n(),
+    .groups = "drop"
+  )
+
+n_by_region_HMA
+
+
+```
+
