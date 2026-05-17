@@ -1,0 +1,3501 @@
+---
+title: "LIM Sponge Analysis"
+author: "Raz"
+date: "2026-03-22"
+output: html_document
+---
+
+### LIM Model Setup Function
+```{r, fig.width=15,fig.height=10}
+
+# -------------------------------------------------------------------------
+# This chunk defines the core function used to initialize and construct
+# the Linear Inverse Model (LIM) system.
+#
+# The function `testsetup` processes the LIM input structure (`liminput`)
+# and converts it into the mathematical representation required for
+# inverse modeling.
+#
+# Main responsibilities of this function:
+# - Compute parameter, component, and external values based on
+#   hierarchical dependencies
+# - Build the system matrices (A, B) representing mass-balance equations
+# - Construct constraint matrices (G, H) for inequality conditions
+# - Handle optional elements such as variables, cost/profit functions,
+#   and markers
+# - Identify unknowns (flows, reactions, or state variables) depending
+#   on the selected model type
+# - Return a structured object of class "lim" containing all matrices
+#   and metadata required for solving the model
+#
+# NOTE:
+# This is a foundational step in the LIM workflow and must be executed
+# before running any model simulations or flux estimations.
+# -------------------------------------------------------------------------
+
+
+
+testsetup <- function (liminput, ...) 
+{
+    calcterm <- function(term, usecomp = TRUE) {
+        calc <- term$val
+        if (!is.na(term$par1)) 
+            calc <- calc * parval[term$par1]
+        if (!is.na(term$par2)) 
+            calc <- calc * parval[term$par2]
+        if (!is.na(term$par3)) 
+            calc <- calc * parval[term$par3]
+        if (!is.na(term$par4)) 
+            calc <- calc * parval[term$par4]
+        if (!is.na(term$comp))
+        	  if (usecomp) calc <- calc * compval[term$comp]
+        if (!is.na(term$external)) 
+            if (usecomp) calc <- calc * externval[term$extern]
+        return(calc)
+    }
+    calcvalues <- function(pars, npar) {
+        if (npar == 0) 
+            return(NULL)
+        parval <- rep(0, length = npar)
+        for (i in 1:npar) {
+            term <- pars[pars$nr == i, ]
+            for (ii in 1:nrow(term)) {
+                parval[i] <- parval[i] + calcterm(term[ii, ])
+            }
+        }
+        return(parval)
+    }
+    calcvariable <- function(vars, ii, vec = rep(0, nunkn + 1)) {
+        term <- vars[vars$nr == ii, ]
+        for (i in 1:nrow(term)) {
+            ct <- calcterm(term[i, ])
+            iv <- term$var[i]
+            ifl <- term[i, unkncol]
+            if (!is.na(iv)) 
+                vec[1:nunkn] <- vec[1:nunkn] + varmat[iv, 1:nunkn] * 
+                  ct
+            if (!is.na(ifl)) {
+                vec[ifl] <- vec[ifl] + ct
+            }
+            if (is.na(iv) & is.na(ifl)) 
+                vec[nunkn + 1] <- vec[nunkn + 1] - ct
+        }
+        return(vec)
+    }
+    ncomp <- length(liminput$compnames)
+    nextern <- length(liminput$externnames)
+    ifelse(is.null(liminput$rate), nrate <- 0, nrate <- ncomp)
+    ifelse(is.null(liminput$marker), nmarker <- 0, nmarker <- nrow(liminput$marker))
+    npar <- length(liminput$parnames)
+    nvars <- length(liminput$varnames)
+    flows <- liminput$flows
+    reactions <- liminput$reactions
+    ispos <- TRUE
+    ifelse(is.null(reactions), nreac <- 0, nreac <- max(reactions$nr))
+    nflow <- nrow(flows)
+    neqs <- nineqs <- 0
+    if (is.null(nflow)) 
+        nflow <- 0
+    if (liminput$Type == "flow") 
+        Unknown <- "F"
+    else if (liminput$Type == "reaction") 
+        Unknown <- "R"
+    else Unknown <- "S"
+    if (Unknown == "F") {
+        nunkn <- nflow
+        if (nunkn == 0) 
+            stop("cannot create inverse matrices: number of flows=0")
+        unkncol <- 9
+        Unknownnames <- liminput$flows$name
+        if (any(!liminput$posreac)) 
+            ispos <- FALSE
+    }
+    else if (Unknown == "R") {
+        nunkn <- max(reactions$nr)
+        if (nunkn == 0) 
+            stop("cannot create inverse matrices: number of unknowns =0")
+        unkncol <- 12
+        Unknownnames <- unique(liminput$reactions$name)
+        if (any(!liminput$posreac)) 
+            ispos <- FALSE
+    }
+    else {
+        nunkn <- ncomp
+        unkncol <- 10
+        if (nunkn == 0) 
+            stop("cannot create inverse matrices: number of components=0")
+        Unknownnames <- liminput$compnames
+    }
+    parval <- rep(NA, npar)
+    compval <- rep(NA, ncomp)
+    if (!is.null(liminput$pars)) {
+        while (any(is.na(parval))) parval <- calcvalues(liminput$pars, 
+            npar)
+    }
+    ifelse(Unknown %in% c("F", "R"), compval <- calcvalues(liminput$comp, 
+        ncomp), compval <- rep(1, ncomp))
+    externval <- calcvalues(liminput$extern, nextern)
+    rateval <- calcvalues(liminput$rate, nrate)
+    markerval <- calcvalues(liminput$marker, nmarker)
+    if (length(rateval) == 0) 
+        rateval <- rep(0, ncomp)
+    rateval[is.na(rateval)] <- 0
+    VarA <- VarB <- NULL
+    if (!is.null(liminput$vars)) {
+        varmat <- matrix(data = 0, nrow = nvars, ncol = nunkn + 
+            1)
+        for (i in 1:nvars) varmat[i, ] <- calcvariable(liminput$vars, 
+            i)
+        VarA <- varmat[, 1:nunkn]
+        VarB <- varmat[, nunkn + 1]
+        if (nvars > 1) 
+            ii <- which(rowSums(abs(VarA)) == 0)
+        else ii <- NULL
+        if (length(ii) > 0) {
+            print(liminput$varnames[ii])
+            stop(paste("cannot proceed: the above variable(s) are  not a true variable, but a parameter:"))
+        }
+    }
+    eqmat <- NULL
+    if (!is.null(liminput$equations)) {
+        neqs <- max(liminput$equations$nr)
+        eqmat <- matrix(data = 0, nrow = neqs, ncol = nunkn + 
+            1)
+        for (i in 1:neqs) eqmat[i, ] <- calcvariable(liminput$equations, 
+            i)
+    }
+    ineqmat <- NULL
+    if (!is.null(liminput$constraints)) {
+        nineqs <- max(liminput$constraints$nr)
+        ineqmat <- matrix(data = 0, nrow = nineqs, ncol = nunkn + 
+            1)
+        for (i in 1:nineqs) ineqmat[i, ] <- calcvariable(liminput$constraints, 
+            i)
+    }
+    cost <- NULL
+    if (!is.null(liminput$cost)) {
+        ncost <- max(liminput$cost$nr)
+        costmat <- matrix(data = 0, nrow = ncost, ncol = nunkn + 
+            1)
+        for (i in 1:ncost) costmat[i, ] <- calcvariable(liminput$cost, 
+            i)
+        cost <- costmat[, 1:nunkn]
+    }
+    profit <- NULL
+    if (!is.null(liminput$profit)) {
+        nprofit <- max(liminput$profit$nr)
+        profitmat <- matrix(data = 0, nrow = nprofit, ncol = nunkn + 
+            1)
+        for (i in 1:nprofit) profitmat[i, ] <- calcvariable(liminput$profit, 
+            i)
+        profit <- profitmat[, 1:nunkn]
+    }
+    A <- B <- G <- H <- NULL
+    if (nflow > 0) {
+        A <- matrix(data = 0, nrow = ncomp, ncol = nunkn)
+        for (i in 1:nflow) {
+            if (flows$from[i] > 0) 
+                A[flows$from[i], i] <- A[flows$from[i], i] - 
+                  1
+            if (flows$to[i] > 0) 
+                A[flows$to[i], i] <- A[flows$to[i], i] + 1
+        }
+        B <- rateval
+    }
+    else if (nreac > 0) {
+        A <- matrix(data = 0, nrow = ncomp, ncol = nunkn)
+        for (i in 1:nrow(reactions)) {
+            st <- reactions[i, "comp"]
+            rr <- reactions[i, "nr"]
+            A[st, rr] <- A[st, rr] + calcterm(reactions[i, ], usecomp = FALSE)
+        }
+        B <- rateval
+    }
+    if (!is.null(eqmat)) {
+        A <- rbind(A, eqmat[, 1:nunkn])
+        B <- c(B, eqmat[, nunkn + 1])
+    }
+    if (nflow > 0 || nreac > 0) {
+        Aext <- cbind(A[1:ncomp, ], rateval)
+        Aext[Aext != 0] <- 1
+        RS <- rowSums(Aext)
+        if (any(RS <= 1)) {
+            warning("following component(s) is possibly an external:")
+            warning(paste(" ", liminput$compnames[which(RS <= 
+                1)]))
+        }
+        G <- diag(nunkn)
+        G <- G[liminput$posreac, ]
+        H <- rep(0, sum(liminput$posreac))
+    }
+    if (!is.null(ineqmat)) {
+        G <- rbind(ineqmat[, 1:nunkn], G)
+        H <- c(ineqmat[, nunkn + 1], H)
+    }
+    if (nflow > 0) {
+        nel <- ncomp + nextern
+        elnames <- c(liminput$compnames, liminput$externnames)
+        Flowmatrix <- matrix(data = 0, nrow = nel, ncol = nel, 
+            dimnames = list(elnames, elnames))
+        flowsft <- as.matrix(flows[, 1:2])
+        flowsft[flowsft < 0] <- -flowsft[flowsft < 0] + ncomp
+        Flowmatrix[flowsft] <- 1:nflow
+    }
+    else Flowmatrix <- NULL
+    if (nmarker == 0) {
+        markers = NULL
+    }
+    else markers = data.frame(name = c(liminput$compnames, liminput$externnames), 
+        val = markerval)
+    res <- list(file = liminput$file, NUnknowns = nunkn, NEquations = neqs, 
+        NConstraints = nineqs, NComponents = ncomp, NExternal = nrow(liminput$extern), 
+        NVariables = nvars, A = A, B = B, G = G, H = H, Cost = cost, 
+        Profit = profit, Flowmatrix = Flowmatrix, VarA = VarA, 
+        VarB = VarB, Parameters = data.frame(name = liminput$parnames, 
+            val = parval), Components = data.frame(name = liminput$compnames, 
+            val = compval), Externals = data.frame(name = liminput$externnames, 
+            val = externval), rates = data.frame(name = liminput$compnames, 
+            val = rateval), markers = markers, Variables = liminput$varnames, 
+        costnames = unique(liminput$cost$name), profitnames = unique(liminput$profit$name), 
+        eqnames = unique(liminput$equations$name), ineqnames = unique(liminput$constraints$name), 
+        Unknowns = Unknownnames, ispos = ispos)
+    class(res) <- "lim"
+    return(res)
+}
+
+
+
+```
+
+
+### Metabolic network model — SMALL sponges (Agelas oroides-updated ranges)
+```{r, fig.width=15,fig.height=10}
+
+# ==============================================================================
+# Metabolic network model — SMALL sponges (Agelas oroides-updated ranges)
+# ------------------------------------------------------------------------------
+# PURPOSE
+#   Run the SMALL LIM model using Agelas-derived parameter ranges wherever
+#   possible, instead of relying only on base values from the input file.
+#
+# MAIN IDEAS IN THIS VERSION
+#   1) Track progress mainly by ACCEPTED solutions, because that is the true
+#      bottleneck in this workflow.
+#   2) Reduce memory use by saving only summary statistics per accepted model,
+#      instead of saving every Xsample draw.
+#   3) Add a CHEAP DIC PRE-CHECK before the expensive full Xsample step.
+#   4) Keep detailed status logs so we can see whether the run is alive.
+#
+# IMPORTANT
+#   - DIC is still not enforced as a hard LIM constraint.
+#   - Instead, it is used as a compatibility filter after sampling.
+#   - In this version, we do:
+#       a) a small pilot Xsample for cheap DIC pre-check
+#       b) only if that looks promising, a full Xsample
+#
+# WHY THIS SHOULD HELP
+#   - Lower memory use
+#   - Less disk writing
+#   - Easier to understand what is happening
+#   - Better visibility into the slow stage: finding accepted solutions
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# 1) Load packages
+# ------------------------------------------------------------------------------
+require(LIM)
+require(dplyr)
+require(tidyr)
+require(readr)
+require(tibble)
+
+# ------------------------------------------------------------------------------
+# 2) Read LIM input + initial sanity check
+# ------------------------------------------------------------------------------
+file <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/Energy_budget/Geodia barretti/4139792/Agelas_oroides_median_ci_rebuilt.input"
+
+stopifnot(file.exists(file))
+
+readLIM <- Read(file)
+
+cat("Input file loaded successfully.\n")
+
+# ------------------------------------------------------------------------------
+# 3) Reproducibility
+# ------------------------------------------------------------------------------
+seed_used <- sample.int(.Machine$integer.max, 1)
+set.seed(seed_used)
+
+# ------------------------------------------------------------------------------
+# 4) Output folder
+# ------------------------------------------------------------------------------
+run_id  <- format(Sys.time(), "%Y%m%d_%H%M%S")
+out_dir <- file.path(getwd(), paste0("SMALL_run_", run_id))
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+cat("All outputs will be saved to:\n", out_dir, "\n")
+
+file.copy(file, file.path(out_dir, basename(file)), overwrite = TRUE)
+
+# ------------------------------------------------------------------------------
+# 5) Settings
+# ------------------------------------------------------------------------------
+# IMPORTANT:
+# target_solutions is the main goal.
+# max_iterations is a safety cap.
+#
+# pilot_xsample_iter:
+#   small pilot sample used only for cheap DIC pre-check
+#
+# full_xsample_iter:
+#   bigger sample used only for models that passed pilot DIC pre-check
+#
+# SAVE_EVERY:
+#   flush to disk every N accepted solutions
+# ------------------------------------------------------------------------------
+max_iterations     <- 1000000
+target_solutions   <- 1000
+
+pilot_xsample_iter <- 30
+full_xsample_iter  <- 200
+
+SAVE_EVERY         <- 50
+STATUS_EVERY       <- 100
+
+# Optional stricter rules:
+# minimum fraction of pilot/full draws that must fall inside DIC range
+min_frac_in_DIC_pilot <- 0.01
+min_frac_in_DIC_full  <- 0.01
+
+# Counters
+n_attempted           <- 0L
+n_accepted            <- 0L
+n_invalid_fraction    <- 0L
+n_testsetup_error     <- 0L
+n_infeasible          <- 0L
+n_pilot_xsample_error <- 0L
+n_full_xsample_error  <- 0L
+n_rejected_DIC_pilot  <- 0L
+n_rejected_DIC_full   <- 0L
+
+# ------------------------------------------------------------------------------
+# 6) Helper functions
+# ------------------------------------------------------------------------------
+
+# Safe setter for a parameter in readLIM
+set_par <- function(obj, nm, value) {
+  idx <- which(obj$pars$name == nm)
+  if (length(idx) != 1) stop("Parameter not found or duplicated in LIM file: ", nm)
+  obj$pars$val[idx] <- value
+  obj
+}
+
+# Base parameter table from the input file
+base_pars <- readLIM$pars %>%
+  dplyr::select(name, val) %>%
+  dplyr::mutate(val = as.numeric(val))
+
+# Read one numeric parameter directly from the input file
+get_input_num <- function(nm) {
+  v <- base_pars$val[base_pars$name == nm]
+  if (length(v) != 1 || !is.finite(v)) {
+    stop("Input value missing/invalid for: ", nm)
+  }
+  v
+}
+
+# Alias
+get_base <- function(nm) {
+  get_input_num(nm)
+}
+
+# Relative range around a base value
+r_rel <- function(base, rel = 0.2) {
+  lo <- base * (1 - rel)
+  hi <- base * (1 + rel)
+  c(min(lo, hi), max(lo, hi))
+}
+
+# Clamp fractions to [0,1]
+clamp01 <- function(x) max(0, min(1, x))
+
+# Draw from min/max parameters stored directly in the input file
+draw_from_input_range <- function(par_name) {
+  lo <- get_input_num(paste0(par_name, "_min"))
+  hi <- get_input_num(paste0(par_name, "_max"))
+
+  if (!is.finite(lo) || !is.finite(hi)) {
+    stop("Non-finite input range for: ", par_name)
+  }
+  if (lo > hi) {
+    stop("Invalid range in input file for: ", par_name, " (min > max)")
+  }
+
+  runif(1, min = lo, max = hi)
+}
+
+# Name Xsample columns consistently
+set_sample_colnames <- function(samples) {
+  colnames(samples) <- c(
+    "BacNupt","DONupt","denit","DNRA","nitr_NH4","nitr_NO2",
+    "biomassprod_nitrif","anammox","biomassprod_anammox","Prod",
+    "tDONupt","cOxyupt","cNH4upt","cNO3rel","cNO2upt","CO2rel","N2rel"
+  )
+  samples
+}
+
+# Summarise sampled fluxes into ONE row per accepted model
+summarise_flux_samples <- function(samples_df) {
+  samples_df %>%
+    summarise(
+      across(
+        everything(),
+        list(
+          mean = ~mean(.x, na.rm = TRUE),
+          sd   = ~sd(.x, na.rm = TRUE),
+          q05  = ~as.numeric(quantile(.x, 0.05, na.rm = TRUE)),
+          q95  = ~as.numeric(quantile(.x, 0.95, na.rm = TRUE))
+        )
+      )
+    )
+}
+
+# Append helper: write header only the first time
+append_csv <- function(df, file_path) {
+  if (!file.exists(file_path)) {
+    write.csv(df, file_path, row.names = FALSE)
+  } else {
+    write.table(
+      df,
+      file = file_path,
+      sep = ",",
+      row.names = FALSE,
+      col.names = FALSE,
+      append = TRUE
+    )
+  }
+}
+
+# ------------------------------------------------------------------------------
+# 7) Save input base parameters
+# ------------------------------------------------------------------------------
+write.csv(
+  base_pars,
+  file.path(out_dir, "BASE_parameters_from_input.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------------------------
+# 8) Read ranges and helpers directly from the input file
+# ------------------------------------------------------------------------------
+
+CN_Bac_min <- get_input_num("CN_Bac")
+CN_Bac_max <- get_input_num("CN_Bac")
+
+CN_DOM_min <- get_input_num("CN_DOM_min")
+CN_DOM_max <- get_input_num("CN_DOM_max")
+
+RQ_min <- get_input_num("RQ_min")
+RQ_max <- get_input_num("RQ_max")
+
+Oxyupt_min <- get_input_num("Oxyupt_min")
+Oxyupt_max <- get_input_num("Oxyupt_max")
+
+DOCupt_min <- get_input_num("DOCupt_min")
+DOCupt_max <- get_input_num("DOCupt_max")
+
+NH4upt_min <- get_input_num("NH4upt_min")
+NH4upt_max <- get_input_num("NH4upt_max")
+
+NOx_min <- get_input_num("NOx_min")
+NOx_max <- get_input_num("NOx_max")
+
+BacCupt_min <- get_input_num("BacCupt_min")
+BacCupt_max <- get_input_num("BacCupt_max")
+
+DICrel_min <- get_input_num("DICrel_min")
+DICrel_max <- get_input_num("DICrel_max")
+
+orig_NO2 <- get_input_num("orig_NO2")
+orig_NO3 <- get_input_num("orig_NO3")
+
+frac_NO2_from_NOx <- abs(orig_NO2) / (abs(orig_NO2) + abs(orig_NO3))
+frac_NO3_from_NOx <- abs(orig_NO3) / (abs(orig_NO2) + abs(orig_NO3))
+
+NO2upt_min_est <- NOx_min * frac_NO2_from_NOx
+NO2upt_max_est <- NOx_max * frac_NO2_from_NOx
+
+NO3rel_min_est <- NOx_min * frac_NO3_from_NOx
+NO3rel_max_est <- NOx_max * frac_NO3_from_NOx
+
+ranges_df <- tibble::tibble(
+  model_parameter = c(
+    "CN_Bac",
+    "CN_DOM",
+    "RQ",
+    "Oxyupt",
+    "DOCupt",
+    "BacCupt",
+    "NH4upt",
+    "NO2upt",
+    "NO3rel",
+    "DICrel"
+  ),
+  source_parameter = c(
+    "input CN_Bac",
+    "input CN_DOM_min/max",
+    "input RQ_min/max",
+    "input Oxyupt_min/max",
+    "input DOCupt_min/max",
+    "input BacCupt_min/max",
+    "input NH4upt_min/max",
+    "input NOx_min/max × frac_NO2_from_NOx",
+    "input NOx_min/max × frac_NO3_from_NOx",
+    "input DICrel_min/max"
+  ),
+  min = c(
+    CN_Bac_min,
+    CN_DOM_min,
+    RQ_min,
+    Oxyupt_min,
+    DOCupt_min,
+    BacCupt_min,
+    NH4upt_min,
+    NO2upt_min_est,
+    NO3rel_min_est,
+    DICrel_min
+  ),
+  max = c(
+    CN_Bac_max,
+    CN_DOM_max,
+    RQ_max,
+    Oxyupt_max,
+    DOCupt_max,
+    BacCupt_max,
+    NH4upt_max,
+    NO2upt_max_est,
+    NO3rel_max_est,
+    DICrel_max
+  )
+)
+
+write.csv(
+  ranges_df,
+  file.path(out_dir, "Input_ranges_used_in_model.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------------------------
+# 8B) Progress + logging + incremental save helpers
+# ------------------------------------------------------------------------------
+
+progress_file          <- file.path(out_dir, "progress_log.txt")
+status_file            <- file.path(out_dir, "run_status.csv")
+accepted_summary_file  <- file.path(out_dir, "accepted_flux_summary.csv")
+accepted_par_file      <- file.path(out_dir, "accepted_parameter_sets.csv")
+accepted_progress_file <- file.path(out_dir, "accepted_progress.csv")
+checkpoint_file        <- file.path(out_dir, "checkpoint_status.rds")
+
+start_time <- Sys.time()
+
+# Initialize status CSV
+write.csv(
+  data.frame(
+    timestamp = as.character(Sys.time()),
+    elapsed_min = 0,
+    attempted = 0,
+    accepted = 0,
+    invalid_fraction = 0,
+    testsetup_error = 0,
+    infeasible = 0,
+    pilot_xsample_error = 0,
+    full_xsample_error = 0,
+    rejected_DIC_pilot = 0,
+    rejected_DIC_full = 0,
+    acceptance_rate = NA_real_
+  ),
+  status_file,
+  row.names = FALSE
+)
+
+# Main progress bar = accepted solutions
+pb_accept <- txtProgressBar(min = 0, max = target_solutions, style = 3)
+
+# In-memory batches to be flushed every SAVE_EVERY accepted solutions
+accepted_summary_batch  <- list()
+accepted_par_batch      <- list()
+accepted_progress_batch <- list()
+
+write_status <- function(force_console = TRUE) {
+  elapsed_min <- as.numeric(difftime(Sys.time(), start_time, units = "mins"))
+  acc_rate <- if (n_attempted > 0) n_accepted / n_attempted else NA_real_
+
+  msg <- paste0(
+    format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+    " | attempted=", n_attempted,
+    " | accepted=", n_accepted,
+    " | invalid_fraction=", n_invalid_fraction,
+    " | testsetup_error=", n_testsetup_error,
+    " | infeasible=", n_infeasible,
+    " | rejected_DIC_pilot=", n_rejected_DIC_pilot,
+    " | rejected_DIC_full=", n_rejected_DIC_full,
+    " | acc_rate=", round(acc_rate, 6),
+    " | elapsed_min=", round(elapsed_min, 2)
+  )
+
+  if (force_console) {
+    cat("\n", msg, "\n", sep = "")
+    flush.console()
+  }
+
+  write(msg, file = progress_file, append = TRUE)
+
+  write.csv(
+    data.frame(
+      timestamp = as.character(Sys.time()),
+      elapsed_min = round(elapsed_min, 2),
+      attempted = n_attempted,
+      accepted = n_accepted,
+      invalid_fraction = n_invalid_fraction,
+      testsetup_error = n_testsetup_error,
+      infeasible = n_infeasible,
+      pilot_xsample_error = n_pilot_xsample_error,
+      full_xsample_error = n_full_xsample_error,
+      rejected_DIC_pilot = n_rejected_DIC_pilot,
+      rejected_DIC_full = n_rejected_DIC_full,
+      acceptance_rate = round(acc_rate, 6)
+    ),
+    status_file,
+    row.names = FALSE
+  )
+}
+
+flush_batches <- function() {
+  if (length(accepted_summary_batch) > 0) {
+    append_csv(bind_rows(accepted_summary_batch), accepted_summary_file)
+    accepted_summary_batch <<- list()
+  }
+
+  if (length(accepted_par_batch) > 0) {
+    append_csv(bind_rows(accepted_par_batch), accepted_par_file)
+    accepted_par_batch <<- list()
+  }
+
+  if (length(accepted_progress_batch) > 0) {
+    append_csv(bind_rows(accepted_progress_batch), accepted_progress_file)
+    accepted_progress_batch <<- list()
+  }
+}
+
+save_checkpoint <- function() {
+  saveRDS(
+    list(
+      n_attempted = n_attempted,
+      n_accepted = n_accepted,
+      n_invalid_fraction = n_invalid_fraction,
+      n_testsetup_error = n_testsetup_error,
+      n_infeasible = n_infeasible,
+      n_pilot_xsample_error = n_pilot_xsample_error,
+      n_full_xsample_error = n_full_xsample_error,
+      n_rejected_DIC_pilot = n_rejected_DIC_pilot,
+      n_rejected_DIC_full = n_rejected_DIC_full,
+      seed_used = seed_used,
+      run_id = run_id
+    ),
+    checkpoint_file
+  )
+}
+
+# ------------------------------------------------------------------------------
+# 9) Monte Carlo loop
+# ------------------------------------------------------------------------------
+for (i in 1:max_iterations) {
+
+  n_attempted <- n_attempted + 1L
+
+  # ---------------------------------------------------------------------------
+  # heartbeat every STATUS_EVERY attempts
+  # ---------------------------------------------------------------------------
+  if (i %% STATUS_EVERY == 0) {
+    write_status(force_console = TRUE)
+  }
+
+  # ---------------------------------------------------------------------------
+  # A) Draw random values
+  # ---------------------------------------------------------------------------
+  rr <- r_rel(get_base("CN_Spo"), 0.10)
+  tmp_CN_Spo <- runif(1, rr[1], rr[2])
+
+  rr <- r_rel(get_base("fp_N_DOM"), 0.20)
+  tmp_fp_N_DOM <- clamp01(runif(1, rr[1], rr[2]))
+
+  rr <- r_rel(get_base("fp_N_Bac"), 0.20)
+  tmp_fp_N_Bac <- clamp01(runif(1, rr[1], rr[2]))
+
+  rr <- r_rel(get_base("fp_N_Denit"), 0.20)
+  tmp_fp_N_Denit <- clamp01(runif(1, rr[1], rr[2]))
+
+  rr <- r_rel(get_base("fp_N_DNRA"), 0.20)
+  tmp_fp_N_DNRA <- clamp01(runif(1, rr[1], rr[2]))
+
+  rr <- r_rel(get_base("Cfix_nit1"), 0.30)
+  tmp_Cfix_nit1 <- runif(1, rr[1], rr[2])
+
+  rr <- r_rel(get_base("Cfix_nit2"), 0.30)
+  tmp_Cfix_nit2 <- runif(1, rr[1], rr[2])
+
+  rr <- r_rel(get_base("Cfix_ana"), 0.30)
+  tmp_Cfix_ana <- runif(1, rr[1], rr[2])
+
+  tmp_CN_Bac  <- runif(1, CN_Bac_min, CN_Bac_max)
+  tmp_CN_DOM  <- draw_from_input_range("CN_DOM")
+  tmp_RQ      <- draw_from_input_range("RQ")
+  tmp_Oxyupt  <- draw_from_input_range("Oxyupt")
+  tmp_DOCupt  <- draw_from_input_range("DOCupt")
+  tmp_BacCupt <- draw_from_input_range("BacCupt")
+  tmp_NH4upt  <- draw_from_input_range("NH4upt")
+  tmp_NO2upt  <- runif(1, NO2upt_min_est, NO2upt_max_est)
+  tmp_NO3rel  <- runif(1, NO3rel_min_est, NO3rel_max_est)
+
+  # ---------------------------------------------------------------------------
+  # B) Build fresh model object
+  # ---------------------------------------------------------------------------
+  rl <- readLIM
+
+  rl <- set_par(rl, "CN_Spo", tmp_CN_Spo)
+  rl <- set_par(rl, "NC_Spo", 1 / tmp_CN_Spo)
+  rl <- set_par(rl, "CN_DOM", tmp_CN_DOM)
+  rl <- set_par(rl, "CN_Bac", tmp_CN_Bac)
+
+  rl <- set_par(rl, "Oxyupt",  tmp_Oxyupt)
+  rl <- set_par(rl, "DOCupt",  tmp_DOCupt)
+  rl <- set_par(rl, "BacCupt", tmp_BacCupt)
+  rl <- set_par(rl, "NH4upt",  tmp_NH4upt)
+  rl <- set_par(rl, "NO2upt",  tmp_NO2upt)
+  rl <- set_par(rl, "NO3rel",  tmp_NO3rel)
+
+  rl <- set_par(rl, "fp_N_DOM",  tmp_fp_N_DOM)
+  rl <- set_par(rl, "fp_N_Bac",  tmp_fp_N_Bac)
+  rl <- set_par(rl, "fex_N_DOM", 1 - tmp_fp_N_DOM)
+  rl <- set_par(rl, "fex_N_Bac", 1 - tmp_fp_N_Bac)
+
+  rl <- set_par(rl, "fp_N_Denit",  tmp_fp_N_Denit)
+  rl <- set_par(rl, "fp_N_DNRA",   tmp_fp_N_DNRA)
+  rl <- set_par(rl, "fex_N_Denit", 1 - tmp_fp_N_Denit)
+  rl <- set_par(rl, "fex_N_DNRA",  1 - tmp_fp_N_DNRA)
+
+  rl <- set_par(rl, "Cfix_nit1", tmp_Cfix_nit1)
+  rl <- set_par(rl, "Cfix_nit2", tmp_Cfix_nit2)
+  rl <- set_par(rl, "Cfix_ana",  tmp_Cfix_ana)
+  rl <- set_par(rl, "RQ",        tmp_RQ)
+
+  # ---------------------------------------------------------------------------
+  # C) Early cheap validity checks BEFORE expensive LIM calls
+  #     This is the first layer of "smart feasibility"
+  # ---------------------------------------------------------------------------
+  fr_C_Bac_calc <- 1 - tmp_CN_Spo * tmp_fp_N_Bac / tmp_CN_Bac
+  fr_C_DOM_calc <- 1 - tmp_CN_Spo * tmp_fp_N_DOM   / tmp_CN_DOM
+  fr_C_Denit_calc <- 1 - tmp_CN_Spo * tmp_fp_N_Denit / tmp_CN_DOM
+  fr_C_DNRA_calc  <- 1 - tmp_CN_Spo * tmp_fp_N_DNRA  / tmp_CN_DOM
+
+  all_fracs <- c(fr_C_Bac_calc, fr_C_DOM_calc, fr_C_Denit_calc, fr_C_DNRA_calc)
+
+  # Reject obviously invalid combinations before testsetup/Ldei
+  if (any(!is.finite(all_fracs)) || any(all_fracs <= 0)) {
+    n_invalid_fraction <- n_invalid_fraction + 1L
+    next
+  }
+
+  rl <- set_par(rl, "fr_C_Bac",   fr_C_Bac_calc)
+  rl <- set_par(rl, "fr_C_DOM",   fr_C_DOM_calc)
+  rl <- set_par(rl, "fr_C_Denit", fr_C_Denit_calc)
+  rl <- set_par(rl, "fr_C_DNRA",  fr_C_DNRA_calc)
+
+  # ---------------------------------------------------------------------------
+  # D) LIM setup + feasibility check
+  #     This is the second layer of "smart feasibility"
+  # ---------------------------------------------------------------------------
+  LIM_loop <- try(testsetup(rl), silent = TRUE)
+  if (inherits(LIM_loop, "try-error")) {
+    n_testsetup_error <- n_testsetup_error + 1L
+    next
+  }
+
+  check_feasible <- try(Ldei(LIM_loop), silent = TRUE)
+  if (inherits(check_feasible, "try-error")) {
+    n_infeasible <- n_infeasible + 1L
+    next
+  }
+  if (isTRUE(check_feasible$IsError)) {
+    n_infeasible <- n_infeasible + 1L
+    next
+  }
+
+  # ---------------------------------------------------------------------------
+  # E) CHEAP DIC PRE-CHECK BEFORE FULL Xsample
+  #     We do a small pilot sample first.
+  #     If even the pilot sample shows no overlap with measured DIC range,
+  #     we skip the expensive full Xsample.
+  # ---------------------------------------------------------------------------
+  pilot_samples <- try(Xsample(LIM_loop, iter = pilot_xsample_iter), silent = TRUE)
+  if (inherits(pilot_samples, "try-error")) {
+    n_pilot_xsample_error <- n_pilot_xsample_error + 1L
+    next
+  }
+
+  pilot_samples <- as.data.frame(pilot_samples)
+  pilot_samples <- set_sample_colnames(pilot_samples)
+
+  pilot_frac_in_DIC <- mean(
+    pilot_samples$CO2rel >= DICrel_min & pilot_samples$CO2rel <= DICrel_max,
+    na.rm = TRUE
+  )
+
+  if (!is.finite(pilot_frac_in_DIC) || pilot_frac_in_DIC < min_frac_in_DIC_pilot) {
+    n_rejected_DIC_pilot <- n_rejected_DIC_pilot + 1L
+    next
+  }
+
+  # ---------------------------------------------------------------------------
+  # F) FULL Xsample only for promising models
+  # ---------------------------------------------------------------------------
+  full_samples <- try(Xsample(LIM_loop, iter = full_xsample_iter), silent = TRUE)
+  if (inherits(full_samples, "try-error")) {
+    n_full_xsample_error <- n_full_xsample_error + 1L
+    next
+  }
+
+  full_samples <- as.data.frame(full_samples)
+  full_samples <- set_sample_colnames(full_samples)
+
+  full_frac_in_DIC <- mean(
+    full_samples$CO2rel >= DICrel_min & full_samples$CO2rel <= DICrel_max,
+    na.rm = TRUE
+  )
+
+  if (!is.finite(full_frac_in_DIC) || full_frac_in_DIC < min_frac_in_DIC_full) {
+    n_rejected_DIC_full <- n_rejected_DIC_full + 1L
+    next
+  }
+
+  # ---------------------------------------------------------------------------
+  # G) Accepted model
+  # ---------------------------------------------------------------------------
+  n_accepted <- n_accepted + 1L
+  accepted_id <- n_accepted
+
+  # Update progress bar by ACCEPTED solutions
+  setTxtProgressBar(pb_accept, n_accepted)
+
+  # Keep only selected parameters that are actually useful later
+  par_this <- LIM_loop$Parameters %>%
+    select(name, val) %>%
+    filter(name %in% c(
+      "CN_DOM", "CN_Spo", "DOCupt", "BacCupt", "Oxyupt", "NH4upt",
+      "NO2upt", "NO3rel", "fr_C_DOM", "fr_C_Bac", "fr_C_Denit", "fr_C_DNRA",
+      "fp_N_DOM", "fp_N_Denit", "fp_N_DNRA"
+    )) %>%
+    pivot_wider(names_from = name, values_from = val) %>%
+    mutate(
+      accepted_id = accepted_id,
+      fp_C_DOM   = 1 - fr_C_DOM,
+      fp_C_Bac   = 1 - fr_C_Bac,
+      fp_C_Denit = 1 - fr_C_Denit,
+      fp_C_DNRA  = 1 - fr_C_DNRA
+    ) %>%
+    select(accepted_id, everything())
+
+  # Summarise full Xsample into ONE row
+  flux_this <- summarise_flux_samples(full_samples) %>%
+    mutate(
+      accepted_id = accepted_id,
+      attempt_id = n_attempted,
+      pilot_frac_in_DIC = pilot_frac_in_DIC,
+      full_frac_in_DIC = full_frac_in_DIC
+    ) %>%
+    select(accepted_id, attempt_id, pilot_frac_in_DIC, full_frac_in_DIC, everything())
+
+  # Save acceptance progress as one row per accepted model
+  accepted_progress_this <- tibble(
+    accepted_id = accepted_id,
+    attempt_id = n_attempted,
+    pilot_frac_in_DIC = pilot_frac_in_DIC,
+    full_frac_in_DIC = full_frac_in_DIC,
+    timestamp = as.character(Sys.time())
+  )
+
+  accepted_par_batch[[length(accepted_par_batch) + 1]] <- par_this
+  accepted_summary_batch[[length(accepted_summary_batch) + 1]] <- flux_this
+  accepted_progress_batch[[length(accepted_progress_batch) + 1]] <- accepted_progress_this
+
+  if (n_accepted %% 10 == 0) {
+    cat("\nAccepted solutions found:", n_accepted,
+        "| Attempts so far:", n_attempted, "\n")
+    flush.console()
+  }
+
+  # ---------------------------------------------------------------------------
+  # H) Flush to disk every SAVE_EVERY accepted solutions
+  # ---------------------------------------------------------------------------
+  if (n_accepted %% SAVE_EVERY == 0) {
+    flush_batches()
+    write_status(force_console = TRUE)
+    save_checkpoint()
+  }
+
+  # Stop early if enough accepted solutions were found
+  if (n_accepted >= target_solutions) break
+}
+
+close(pb_accept)
+
+# Final flush
+flush_batches()
+write_status(force_console = TRUE)
+save_checkpoint()
+
+# ------------------------------------------------------------------------------
+# 10) Read saved outputs
+# ------------------------------------------------------------------------------
+if (!file.exists(accepted_par_file) || !file.exists(accepted_summary_file)) {
+  stop("No accepted solutions were saved to disk.")
+}
+
+par_saved  <- read.csv(accepted_par_file)
+flux_saved <- read.csv(accepted_summary_file)
+
+n_accepted_final <- length(unique(par_saved$accepted_id))
+
+if (n_accepted_final == 0) {
+  stop("No accepted solutions remained after full DIC filter.")
+}
+
+acc_rate <- n_accepted / n_attempted
+
+cat(
+  "\nFINAL SUMMARY\n",
+  "Attempts:", n_attempted,
+  "| Accepted:", n_accepted,
+  "| Acceptance rate:", round(acc_rate, 6), "\n"
+)
+
+# ------------------------------------------------------------------------------
+# 11) Build final model-level output table
+# ------------------------------------------------------------------------------
+# Because we already saved ONE summary row per accepted model,
+# there is no need to average across thousands of raw draws later.
+output2 <- flux_saved %>%
+  left_join(par_saved, by = "accepted_id")
+
+write.csv(
+  output2,
+  file.path(out_dir, "accepted_model_level_output.csv"),
+  row.names = FALSE
+)
+
+# ------------------------------------------------------------------------------
+# 12) Save run metadata and QC
+# ------------------------------------------------------------------------------
+qc_txt <- file.path(out_dir, "QC_run_info.txt")
+writeLines(
+  c(
+    paste0("input_file: ", file),
+    paste0("run_id: ", run_id),
+    paste0("seed: ", seed_used),
+    paste0("max_iterations: ", max_iterations),
+    paste0("target_solutions: ", target_solutions),
+    paste0("pilot_xsample_iter: ", pilot_xsample_iter),
+    paste0("full_xsample_iter: ", full_xsample_iter),
+    paste0("SAVE_EVERY: ", SAVE_EVERY),
+    paste0("STATUS_EVERY: ", STATUS_EVERY),
+    paste0("min_frac_in_DIC_pilot: ", min_frac_in_DIC_pilot),
+    paste0("min_frac_in_DIC_full: ", min_frac_in_DIC_full),
+    "",
+    paste0("attempted: ", n_attempted),
+    paste0("accepted: ", n_accepted),
+    paste0("acceptance_rate: ", round(acc_rate, 6)),
+    paste0("invalid_fraction: ", n_invalid_fraction),
+    paste0("testsetup_error: ", n_testsetup_error),
+    paste0("infeasible: ", n_infeasible),
+    paste0("pilot_xsample_error: ", n_pilot_xsample_error),
+    paste0("full_xsample_error: ", n_full_xsample_error),
+    paste0("rejected_DIC_pilot: ", n_rejected_DIC_pilot),
+    paste0("rejected_DIC_full: ", n_rejected_DIC_full),
+    paste0("DICrel_min: ", DICrel_min),
+    paste0("DICrel_max: ", DICrel_max),
+    "",
+    "Input-derived ranges used:",
+    capture.output(print(ranges_df))
+  ),
+  con = qc_txt
+)
+
+sink(file.path(out_dir, "sessionInfo.txt"))
+print(sessionInfo())
+sink()
+
+cat("\nSuccess! Outputs saved to:\n", out_dir, "\n")
+
+```
+
+
+### Build summary tables from ACCEPTED model outputs
+
+```{r, fig.width=15,fig.height=10}
+# ==============================================================================
+# Build summary tables from ACCEPTED flux samples + parameter sets
+# ------------------------------------------------------------------------------
+# PURPOSE
+# Build paper-style summary tables from:
+#   1) accepted_flux_samples.csv
+#   2) accepted_parameter_sets.csv
+#   3) Input_ranges_used_in_model.csv
+#
+# IMPORTANT
+# In this run structure:
+# - accepted_flux_samples.csv contains all Xsample draws
+# - accepted_parameter_sets.csv is saved in LONG format:
+#     accepted_id, name, val
+# - therefore we must:
+#     a) rebuild the parameter table to WIDE format
+#     b) average fluxes within each accepted_id
+#     c) join parameters + model-level means
+# ==============================================================================
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(tibble)
+library(openxlsx)
+library(stringr)
+
+# ==============================================================================
+# 0) USER INPUT
+# ==============================================================================
+run_dir <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260512_162324"
+
+flux_file   <- file.path(run_dir, "accepted_flux_samples.csv")
+param_file  <- file.path(run_dir, "accepted_parameter_sets.csv")
+ranges_file <- file.path(run_dir, "Input_ranges_used_in_model.csv")
+
+output_dir <- file.path(run_dir, "tables_from_accepted_outputs")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# ==============================================================================
+# 1) CHECK FILES
+# ==============================================================================
+if (!file.exists(flux_file)) {
+  stop("Flux samples file does not exist:\n", flux_file)
+}
+
+if (!file.exists(param_file)) {
+  stop("Parameter file does not exist:\n", param_file)
+}
+
+if (!file.exists(ranges_file)) {
+  stop("Ranges file does not exist:\n", ranges_file)
+}
+
+# ==============================================================================
+# 2) READ FILES
+# ==============================================================================
+df_flux_raw <- read_csv(flux_file, show_col_types = FALSE)
+df_par_raw  <- read_csv(param_file, show_col_types = FALSE)
+ranges_df   <- read_csv(ranges_file, show_col_types = FALSE)
+
+if (nrow(df_flux_raw) == 0) stop("accepted_flux_samples.csv has 0 rows.")
+if (nrow(df_par_raw)  == 0) stop("accepted_parameter_sets.csv has 0 rows.")
+if (nrow(ranges_df)   == 0) stop("Input_ranges_used_in_model.csv has 0 rows.")
+
+# ==============================================================================
+# 3) REQUIRED COLUMNS CHECK
+# ==============================================================================
+required_flux_cols <- c(
+  "accepted_id", "xsample_draw",
+  "BacNupt", "DONupt", "denit", "DNRA", "nitr_NH4", "nitr_NO2",
+  "biomassprod_nitrif", "anammox", "biomassprod_anammox", "Prod",
+  "tDONupt", "cOxyupt", "cNH4upt", "cNO3rel", "cNO2upt", "CO2rel", "N2rel"
+)
+
+missing_flux_cols <- setdiff(required_flux_cols, names(df_flux_raw))
+if (length(missing_flux_cols) > 0) {
+  stop(
+    "Missing required columns in accepted_flux_samples.csv:\n",
+    paste(missing_flux_cols, collapse = ", ")
+  )
+}
+
+required_par_long_cols <- c("accepted_id", "name", "val")
+missing_par_long_cols <- setdiff(required_par_long_cols, names(df_par_raw))
+if (length(missing_par_long_cols) > 0) {
+  stop(
+    "accepted_parameter_sets.csv must contain:\n",
+    paste(required_par_long_cols, collapse = ", "),
+    "\nMissing:\n",
+    paste(missing_par_long_cols, collapse = ", ")
+  )
+}
+
+# ==============================================================================
+# 4) REBUILD PARAMETER TABLE TO WIDE FORMAT
+# ==============================================================================
+df_par <- df_par_raw %>%
+  mutate(val = as.numeric(val)) %>%
+  select(accepted_id, name, val) %>%
+  pivot_wider(names_from = name, values_from = val) %>%
+  mutate(
+    fp_C_DOM   = 1 - fr_C_DOM,
+    fp_C_Bac   = 1 - fr_C_Bac,
+    fp_C_Denit = 1 - fr_C_Denit,
+    fp_C_DNRA  = 1 - fr_C_DNRA
+  )
+
+required_par_cols <- c(
+  "accepted_id",
+  "Oxyupt", "NH4upt", "NO2upt", "NO3rel", "DOCupt", "BacCupt",
+  "CN_Spo", "CN_DOM",
+  "fp_N_DOM", "fp_N_Denit", "fp_N_DNRA",
+  "fr_C_Denit", "fr_C_DNRA",
+  "fp_C_DOM", "fp_C_Denit", "fp_C_DNRA"
+)
+
+missing_par_cols <- setdiff(required_par_cols, names(df_par))
+if (length(missing_par_cols) > 0) {
+  stop(
+    "Missing required columns in rebuilt parameter table:\n",
+    paste(missing_par_cols, collapse = ", ")
+  )
+}
+
+write_csv(
+  df_par,
+  file.path(output_dir, "accepted_parameter_sets_wide_rebuilt.csv")
+)
+
+# ==============================================================================
+# 5) HELPER FUNCTIONS
+# ==============================================================================
+safe_mean <- function(x) {
+  if (all(is.na(x))) return(NA_real_)
+  mean(x, na.rm = TRUE)
+}
+
+safe_sd <- function(x) {
+  if (sum(!is.na(x)) < 2) return(NA_real_)
+  sd(x, na.rm = TRUE)
+}
+
+safe_min <- function(x) {
+  if (all(is.na(x))) return(NA_real_)
+  min(x, na.rm = TRUE)
+}
+
+safe_max <- function(x) {
+  if (all(is.na(x))) return(NA_real_)
+  max(x, na.rm = TRUE)
+}
+
+safe_q <- function(x, prob) {
+  if (all(is.na(x))) return(NA_real_)
+  as.numeric(quantile(x, probs = prob, na.rm = TRUE, names = FALSE))
+}
+
+safe_median <- function(x) {
+  if (all(is.na(x))) return(NA_real_)
+  median(x, na.rm = TRUE)
+}
+
+n_non_na <- function(x) {
+  sum(!is.na(x))
+}
+
+fmt_num <- function(x, digits = 2) {
+  ifelse(
+    is.na(x),
+    NA_character_,
+    format(round(x, digits), nsmall = digits, trim = TRUE)
+  )
+}
+
+mean_sd_str <- function(x, digits_mean = 2, digits_sd = 2) {
+  m <- safe_mean(x)
+  s <- safe_sd(x)
+  if (is.na(m) || is.na(s)) return(NA_character_)
+  paste0(
+    format(round(m, digits_mean), nsmall = digits_mean, trim = TRUE),
+    " ± ",
+    format(round(s, digits_sd), nsmall = digits_sd, trim = TRUE)
+  )
+}
+
+median_q_str <- function(x, digits = 2) {
+  med <- safe_median(x)
+  q05 <- safe_q(x, 0.05)
+  q95 <- safe_q(x, 0.95)
+  if (is.na(med) || is.na(q05) || is.na(q95)) return(NA_character_)
+  paste0(
+    fmt_num(med, digits), " [",
+    fmt_num(q05, digits), "–",
+    fmt_num(q95, digits), "]"
+  )
+}
+
+safe_div <- function(num, den, min_den = 1e-8) {
+  out <- ifelse(is.na(den) | abs(den) < min_den, NA_real_, num / den)
+  out[!is.finite(out)] <- NA_real_
+  out
+}
+
+ratio_of_sums <- function(num, den, multiplier = 1, min_den = 1e-8) {
+  s_num <- sum(num, na.rm = TRUE)
+  s_den <- sum(den, na.rm = TRUE)
+  if (is.na(s_den) || abs(s_den) < min_den) return(NA_real_)
+  multiplier * s_num / s_den
+}
+
+ratio_summary <- function(num, den, multiplier = 100, min_den = 1e-8) {
+  r <- safe_div(num, den, min_den = min_den)
+
+  tibble(
+    N_valid       = sum(!is.na(r)),
+    Ratio_of_sums = ratio_of_sums(num, den, multiplier = multiplier, min_den = min_den),
+    Mean_ratio    = if (all(is.na(r))) NA_real_ else multiplier * mean(r, na.rm = TRUE),
+    SD_ratio      = if (sum(!is.na(r)) < 2) NA_real_ else multiplier * sd(r, na.rm = TRUE),
+    Median_ratio  = if (all(is.na(r))) NA_real_ else multiplier * median(r, na.rm = TRUE),
+    Q05_ratio     = if (all(is.na(r))) NA_real_ else multiplier * safe_q(r, 0.05),
+    Q95_ratio     = if (all(is.na(r))) NA_real_ else multiplier * safe_q(r, 0.95)
+  )
+}
+
+# ==============================================================================
+# 6) REBUILD MODEL-LEVEL OUTPUT FROM RAW XSAMPLE DRAWS
+# ------------------------------------------------------------------------------
+# One row per accepted_id:
+# - average fluxes across xsample draws
+# - join accepted parameter values
+# ==============================================================================
+df_model <- df_flux_raw %>%
+  group_by(accepted_id) %>%
+  summarise(
+    BacNupt_mean             = mean(BacNupt, na.rm = TRUE),
+    DONupt_mean              = mean(DONupt, na.rm = TRUE),
+    denit_mean               = mean(denit, na.rm = TRUE),
+    DNRA_mean                = mean(DNRA, na.rm = TRUE),
+    nitr_NH4_mean            = mean(nitr_NH4, na.rm = TRUE),
+    nitr_NO2_mean            = mean(nitr_NO2, na.rm = TRUE),
+    biomassprod_nitrif_mean  = mean(biomassprod_nitrif, na.rm = TRUE),
+    anammox_mean             = mean(anammox, na.rm = TRUE),
+    biomassprod_anammox_mean = mean(biomassprod_anammox, na.rm = TRUE),
+    Prod_mean                = mean(Prod, na.rm = TRUE),
+    tDONupt_mean             = mean(tDONupt, na.rm = TRUE),
+    cOxyupt_mean             = mean(cOxyupt, na.rm = TRUE),
+    cNH4upt_mean             = mean(cNH4upt, na.rm = TRUE),
+    cNO3rel_mean             = mean(cNO3rel, na.rm = TRUE),
+    cNO2upt_mean             = mean(cNO2upt, na.rm = TRUE),
+    CO2rel_mean              = mean(CO2rel, na.rm = TRUE),
+    N2rel_mean               = mean(N2rel, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(df_par, by = "accepted_id")
+
+if (nrow(df_model) == 0) {
+  stop("No model-level rows could be rebuilt.")
+}
+
+write_csv(
+  df_model,
+  file.path(output_dir, "accepted_model_level_output_rebuilt.csv")
+)
+
+# ==============================================================================
+# 7) REBUILD DERIVED FLUX COLUMNS
+# ==============================================================================
+df_flux <- df_model %>%
+  mutate(
+    BacNupt = BacNupt_mean,
+    DONupt  = DONupt_mean,
+    denit   = denit_mean,
+    DNRA    = DNRA_mean,
+    nitr_NH4 = nitr_NH4_mean,
+    nitr_NO2 = nitr_NO2_mean,
+    biomassprod_nitrif  = biomassprod_nitrif_mean,
+    anammox             = anammox_mean,
+    biomassprod_anammox = biomassprod_anammox_mean,
+    Prod   = Prod_mean,
+    CO2rel = CO2rel_mean,
+    N2rel  = N2rel_mean,
+
+    r10_totCprod   = Prod_mean * CN_Spo,
+    r2_CProd_DOC   = DONupt_mean * CN_DOM * fp_C_DOM,
+    r3_CProd_denit = denit_mean  * CN_DOM * fp_C_Denit,
+    r4_CProd_DNRA  = DNRA_mean   * CN_DOM * fp_C_DNRA
+  )
+
+# ==============================================================================
+# 8) PARAMETER SUMMARY
+# ==============================================================================
+target_params <- c(
+  "CN_Spo", "CN_DOM",
+  "fp_N_DOM", "fp_N_Denit", "fp_N_DNRA",
+  "fr_C_Denit", "fr_C_DNRA",
+  "fp_C_DOM", "fp_C_Denit", "fp_C_DNRA",
+  "Oxyupt", "NH4upt", "NO2upt", "NO3rel", "DOCupt", "BacCupt"
+)
+
+param_summary <- tibble(parameter = target_params) %>%
+  rowwise() %>%
+  mutate(
+    N_nonNA = n_non_na(df_par[[parameter]]),
+    Mean = safe_mean(df_par[[parameter]]),
+    SD   = safe_sd(df_par[[parameter]]),
+    Min  = safe_min(df_par[[parameter]]),
+    Max  = safe_max(df_par[[parameter]]),
+    Q05  = safe_q(df_par[[parameter]], 0.05),
+    Q95  = safe_q(df_par[[parameter]], 0.95),
+    `Mean ± SD` = paste0(fmt_num(Mean, 3), " ± ", fmt_num(SD, 3)),
+    `Median [Q05–Q95]` = median_q_str(df_par[[parameter]], digits = 3),
+    source_used = "accepted_parameter_sets"
+  ) %>%
+  ungroup()
+
+ranges_used_tbl <- ranges_df %>%
+  transmute(
+    parameter = model_parameter,
+    range_min_used = min,
+    range_max_used = max,
+    source_parameter = source_parameter
+  )
+
+table2_parameters_like <- param_summary %>%
+  left_join(ranges_used_tbl, by = "parameter") %>%
+  select(
+    parameter, N_nonNA,
+    Mean, SD, Min, Max, Q05, Q95,
+    range_min_used, range_max_used, source_parameter,
+    source_used,
+    `Mean ± SD`, `Median [Q05–Q95]`
+  )
+
+# ==============================================================================
+# 9) TABLE 1-LIKE: EXTERNAL / CONSTRAINED FLUXES
+# ==============================================================================
+table1_map <- tibble(
+  Flux = c(
+    "Bacteria-C assimilation (r1_C proxy)",
+    "Bacteria-N assimilation (r1_N proxy)",
+    "Dissolved organic carbon, DOC (r11_C)",
+    "Dissolved organic nitrogen, DON (r11_N)",
+    "O2 uptake (r12)",
+    "NH4 exchange (r13)",
+    "NO3 release (r14)",
+    "NO2 exchange (r15)"
+  ),
+  Units = c(
+    "µmol C cm^-3 day^-1",
+    "µmol N cm^-3 day^-1",
+    "µmol C cm^-3 day^-1",
+    "µmol N cm^-3 day^-1",
+    "µmol O2 cm^-3 day^-1",
+    "µmol N cm^-3 day^-1",
+    "µmol N cm^-3 day^-1",
+    "µmol N cm^-3 day^-1"
+  ),
+  col = c("BacCupt", "BacNupt", "DOCupt", "DONupt", "Oxyupt", "NH4upt", "NO3rel", "NO2upt")
+)
+
+table1_like <- table1_map %>%
+  rowwise() %>%
+  mutate(
+    N_nonNA = n_non_na(df_flux[[col]]),
+    Mean = safe_mean(df_flux[[col]]),
+    SD   = safe_sd(df_flux[[col]]),
+    Min  = safe_min(df_flux[[col]]),
+    Max  = safe_max(df_flux[[col]]),
+    Q05  = safe_q(df_flux[[col]], 0.05),
+    Q95  = safe_q(df_flux[[col]], 0.95),
+    `Mean ± SD` = mean_sd_str(df_flux[[col]], digits_mean = 2, digits_sd = 2),
+    `Median [Q05–Q95]` = median_q_str(df_flux[[col]], digits = 2)
+  ) %>%
+  ungroup() %>%
+  select(Flux, Units, N_nonNA, Mean, SD, Min, Max, Q05, Q95, `Mean ± SD`, `Median [Q05–Q95]`)
+
+# ==============================================================================
+# 10) TABLE 2-LIKE: REACTION OVERVIEW
+# ==============================================================================
+table2_like <- tribble(
+  ~r,   ~Description,                    ~Primary_output_column, ~Process_group,
+  "r1", "Bacteria consumption",          "BacNupt / BacCupt",    "Aerobic consumption",
+  "r2", "DOM consumption",               "DONupt / DOCupt",      "Aerobic consumption",
+  "r3", "Denitrification",               "denit",                "Anaerobic consumption",
+  "r4", "DNRA",                          "DNRA",                 "Anaerobic consumption",
+  "r5", "NH4 oxidation",                 "nitr_NH4",             "Chemoautotrophy",
+  "r6", "NO2 oxidation",                 "nitr_NO2",             "Chemoautotrophy",
+  "r7", "Production from nitrification", "biomassprod_nitrif",   "Stoichiometric coupling",
+  "r8", "Anammox",                       "anammox",              "Chemoautotrophy",
+  "r9", "Production from anammox",       "biomassprod_anammox",  "Stoichiometric coupling",
+  "r10","Production",                    "Prod / r10_totCprod",  "Closure term",
+  "r11","Total DOM uptake",              "DONupt / DOCupt",      "Exchange",
+  "r12","Oxygen uptake",                 "Oxyupt",               "Exchange",
+  "r13","NH4 exchange",                  "NH4upt",               "Exchange",
+  "r14","NO3 release",                   "NO3rel",               "Exchange",
+  "r15","NO2 exchange",                  "NO2upt",               "Exchange",
+  "r16","CO2 release",                   "CO2rel",               "Exchange",
+  "r17","N2 release",                    "N2rel",                "Exchange"
+) %>%
+  mutate(
+    Comment = c(
+      "Coupled to bacterial stoichiometry and model closure",
+      "Coupled to CN_DOM and DOM partitioning",
+      "Coupled to CN_DOM and denitrification partitioning",
+      "Coupled to CN_DOM and DNRA partitioning",
+      "Stoichiometric O2 demand",
+      "Stoichiometric O2 demand",
+      "Nitrification-linked production",
+      "Anaerobic ammonium oxidation",
+      "Anammox-linked production",
+      "Holobiont production",
+      "External DOM constraint",
+      "External O2 constraint",
+      "External NH4 constraint",
+      "External NO3 constraint",
+      "External NO2 constraint",
+      "External CO2 release",
+      "External N2 release"
+    )
+  )
+
+# ==============================================================================
+# 11) TABLE 3-LIKE: MODEL FLUXES
+# ==============================================================================
+table3_fluxes_spec <- tribble(
+  ~Metric,                                  ~Units,                   ~Currency, ~col,
+  "Bacteria assimilation (r1)",             "µmol C cm^-3 day^-1",   "C",       "BacCupt",
+  "Bacteria assimilation (r1)",             "µmol N cm^-3 day^-1",   "N",       "BacNupt",
+  "Dissolved organic matter assimilation (r2)", "µmol C cm^-3 day^-1", "C",     "DOCupt",
+  "Dissolved organic matter assimilation (r2)", "µmol N cm^-3 day^-1", "N",     "DONupt",
+  "Denitrification (r3)",                   "µmol C cm^-3 day^-1",   "C",       "r3_CProd_denit",
+  "Denitrification (r3)",                   "µmol N cm^-3 day^-1",   "N",       "denit",
+  "DNRA (r4)",                              "µmol C cm^-3 day^-1",   "C",       "r4_CProd_DNRA",
+  "DNRA (r4)",                              "µmol N cm^-3 day^-1",   "N",       "DNRA",
+  "NH4 oxidation (r5)",                     "µmol N cm^-3 day^-1",   "N",       "nitr_NH4",
+  "NO2 oxidation (r6)",                     "µmol N cm^-3 day^-1",   "N",       "nitr_NO2",
+  "Production - nitrification (r7)",        "µmol C cm^-3 day^-1",   "C",       "biomassprod_nitrif",
+  "Production - nitrification (r7)",        "µmol N cm^-3 day^-1",   "N",       "biomassprod_nitrif",
+  "Anammox (r8)",                           "µmol N cm^-3 day^-1",   "N",       "anammox",
+  "Production - anammox (r9)",              "µmol C cm^-3 day^-1",   "C",       "biomassprod_anammox",
+  "Production - anammox (r9)",              "µmol N cm^-3 day^-1",   "N",       "biomassprod_anammox",
+  "Production (r10)",                       "µmol C cm^-3 day^-1",   "C",       "r10_totCprod",
+  "Production (r10)",                       "µmol N cm^-3 day^-1",   "N",       "Prod",
+  "Total DOM uptake (r11)",                 "µmol C cm^-3 day^-1",   "C",       "DOCupt",
+  "Total DOM uptake (r11)",                 "µmol N cm^-3 day^-1",   "N",       "DONupt",
+  "Oxygen uptake (r12)",                    "µmol O2 cm^-3 day^-1",  "O2",      "Oxyupt",
+  "NH4 exchange (r13)",                     "µmol N cm^-3 day^-1",   "N",       "NH4upt",
+  "NO3 release (r14)",                      "µmol N cm^-3 day^-1",   "N",       "NO3rel",
+  "NO2 exchange (r15)",                     "µmol N cm^-3 day^-1",   "N",       "NO2upt",
+  "CO2 release (r16)",                      "µmol C cm^-3 day^-1",   "C",       "CO2rel",
+  "N2 release (r17)",                       "µmol N cm^-3 day^-1",   "N",       "N2rel"
+)
+
+table3_fluxes_like <- bind_rows(lapply(seq_len(nrow(table3_fluxes_spec)), function(i) {
+  spec_row <- table3_fluxes_spec[i, ]
+  vals <- df_flux[[spec_row$col]]
+
+  if (spec_row$Metric == "Production - nitrification (r7)" && spec_row$Currency == "C") {
+    vals <- df_flux$biomassprod_nitrif * df_flux$CN_Spo
+  }
+
+  if (spec_row$Metric == "Production - anammox (r9)" && spec_row$Currency == "C") {
+    vals <- df_flux$biomassprod_anammox * df_flux$CN_Spo
+  }
+
+  tibble(
+    Metric = spec_row$Metric,
+    Units = spec_row$Units,
+    Currency = spec_row$Currency,
+    Source_column = spec_row$col,
+    N_nonNA = n_non_na(vals),
+    Mean = safe_mean(vals),
+    SD   = safe_sd(vals),
+    Min  = safe_min(vals),
+    Max  = safe_max(vals),
+    Q05  = safe_q(vals, 0.05),
+    Q95  = safe_q(vals, 0.95),
+    `Mean ± SD` = mean_sd_str(vals, digits_mean = 3, digits_sd = 3),
+    `Median [Q05–Q95]` = median_q_str(vals, digits = 3)
+  )
+}))
+
+# ==============================================================================
+# 12) TABLE 3-LIKE: FRACTIONS / EFFICIENCIES
+# ==============================================================================
+nitrif_total_N <- df_flux$nitr_NH4 + df_flux$nitr_NO2
+
+microbial_prod_C <- df_flux$r2_CProd_DOC +
+  df_flux$r3_CProd_denit +
+  df_flux$r4_CProd_DNRA +
+  (df_flux$biomassprod_nitrif + df_flux$biomassprod_anammox) * df_flux$CN_Spo
+
+microbial_prod_N <- safe_div(
+  df_flux$r2_CProd_DOC + df_flux$r3_CProd_denit + df_flux$r4_CProd_DNRA,
+  df_flux$CN_Spo
+) + df_flux$biomassprod_nitrif + df_flux$biomassprod_anammox
+
+chemoauto_prod_C <- (df_flux$biomassprod_nitrif + df_flux$biomassprod_anammox) * df_flux$CN_Spo
+chemoauto_prod_N <- df_flux$biomassprod_nitrif + df_flux$biomassprod_anammox
+
+table3_fractions_like <- bind_rows(
+  ratio_summary(df_flux$r2_CProd_DOC, df_flux$DOCupt, multiplier = 100) %>%
+    mutate(Metric = "Production efficiency on DOC (C)", Units = "%"),
+
+  ratio_summary(df_flux$r10_totCprod, df_flux$DOCupt + df_flux$BacCupt, multiplier = 100) %>%
+    mutate(Metric = "Production efficiency (total input) (C)", Units = "%"),
+
+  ratio_summary(df_flux$Prod, df_flux$DONupt + df_flux$BacNupt, multiplier = 100) %>%
+    mutate(Metric = "Production efficiency (total input) (N)", Units = "%"),
+
+  ratio_summary(microbial_prod_C, df_flux$r10_totCprod, multiplier = 100) %>%
+    mutate(Metric = "Fraction microbial production to total production (C)", Units = "%"),
+
+  ratio_summary(microbial_prod_N, df_flux$Prod, multiplier = 100) %>%
+    mutate(Metric = "Fraction microbial production to total production (N)", Units = "%"),
+
+  ratio_summary(chemoauto_prod_C, df_flux$r10_totCprod, multiplier = 100) %>%
+    mutate(Metric = "Fraction chemoautotrophy to total production (C)", Units = "%"),
+
+  ratio_summary(chemoauto_prod_N, df_flux$Prod, multiplier = 100) %>%
+    mutate(Metric = "Fraction chemoautotrophy to total production (N)", Units = "%"),
+
+  ratio_summary(df_flux$denit, nitrif_total_N, multiplier = 100, min_den = 1e-4) %>%
+    mutate(Metric = "Fraction denitrification to nitrification", Units = "%"),
+
+  ratio_summary(df_flux$DNRA, nitrif_total_N, multiplier = 100, min_den = 1e-4) %>%
+    mutate(Metric = "Fraction DNRA to nitrification", Units = "%"),
+
+  ratio_summary(df_flux$CO2rel, df_flux$Oxyupt, multiplier = 1) %>%
+    mutate(Metric = "Apparent CO2:O2 exchange ratio", Units = "-")
+) %>%
+  mutate(
+    `Mean ± SD` = paste0(fmt_num(Mean_ratio, 2), " ± ", fmt_num(SD_ratio, 2)),
+    `Median [Q05–Q95]` = paste0(
+      fmt_num(Median_ratio, 2), " [",
+      fmt_num(Q05_ratio, 2), "–",
+      fmt_num(Q95_ratio, 2), "]"
+    ),
+    Ratio_of_sums = round(Ratio_of_sums, 2),
+    Mean_ratio    = round(Mean_ratio, 2),
+    SD_ratio      = round(SD_ratio, 2),
+    Median_ratio  = round(Median_ratio, 2),
+    Q05_ratio     = round(Q05_ratio, 2),
+    Q95_ratio     = round(Q95_ratio, 2)
+  ) %>%
+  select(
+    Metric, Units, N_valid,
+    Ratio_of_sums, Mean_ratio, SD_ratio,
+    Median_ratio, Q05_ratio, Q95_ratio,
+    `Mean ± SD`, `Median [Q05–Q95]`
+  )
+
+
+# ==============================================================================
+# 12B) EXTRA SUMMARY TABLE WITH TRUE CI95%
+# ------------------------------------------------------------------------------
+# New additional table only
+# Does NOT replace existing tables
+# Columns:
+# Parameter, C/N/O2/%, n, Mean, Median, SD, CI95%, Min, Max
+# ==============================================================================
+
+# ---- helper: CI95 half-width ----
+safe_ci95_half <- function(x) {
+  x <- x[!is.na(x)]
+  n <- length(x)
+
+  if (n < 2) return(NA_real_)
+
+  s <- sd(x)
+  se <- s / sqrt(n)
+  tcrit <- qt(0.975, df = n - 1)
+
+  se * tcrit
+}
+
+# ---- helper: summary row ----
+make_summary_row <- function(parameter_name, currency_label, values) {
+  values <- values[!is.na(values)]
+  n <- length(values)
+
+  mean_val   <- if (n == 0) NA_real_ else mean(values)
+  median_val <- if (n == 0) NA_real_ else median(values)
+  sd_val     <- if (n < 2)  NA_real_ else sd(values)
+  ci95_half  <- safe_ci95_half(values)
+  min_val    <- if (n == 0) NA_real_ else min(values)
+  max_val    <- if (n == 0) NA_real_ else max(values)
+
+  tibble(
+    Parameter = parameter_name,
+    `C/N/O2/%` = currency_label,
+    n = n,
+    Mean = mean_val,
+    Median = median_val,
+    SD = sd_val,
+    `CI95%` = ci95_half,
+    Min = min_val,
+    Max = max_val
+  )
+}
+
+# ---- define exactly the rows you want ----
+extra_table_spec <- tribble(
+  ~Parameter,                                           ~Currency, ~Type,        ~col,
+  "Bacteria assimilation (r1)",                         "C",       "direct",     "BacCupt",
+  "Dissolved organic matter assimilation (r2)",         "C",       "direct",     "DOCupt",
+  "Denitrification (r3)",                               "C",       "direct",     "r3_CProd_denit",
+  "DNRA (r4)",                                          "C",       "direct",     "r4_CProd_DNRA",
+  "Production - nitrification (r7)",                    "C",       "calc",       "prod_nitrif_C",
+  "Production - anammox (r9)",                          "C",       "calc",       "prod_anammox_C",
+  "Production (r10)",                                   "C",       "direct",     "r10_totCprod",
+  "Total DOM uptake (r11)",                             "C",       "direct",     "DOCupt",
+  "CO2 release (r16)",                                  "C",       "direct",     "CO2rel",
+
+  "Bacteria assimilation (r1)",                         "N",       "direct",     "BacNupt",
+  "Dissolved organic matter assimilation (r2)",         "N",       "direct",     "DONupt",
+  "Denitrification (r3)",                               "N",       "direct",     "denit",
+  "DNRA (r4)",                                          "N",       "direct",     "DNRA",
+  "NH4 oxidation (r5)",                                 "N",       "direct",     "nitr_NH4",
+  "NO2 oxidation (r6)",                                 "N",       "direct",     "nitr_NO2",
+  "Production - nitrification (r7)",                    "N",       "direct",     "biomassprod_nitrif",
+  "Anammox (r8)",                                       "N",       "direct",     "anammox",
+  "Production - anammox (r9)",                          "N",       "direct",     "biomassprod_anammox",
+  "Production (r10)",                                   "N",       "direct",     "Prod",
+  "Total DOM uptake (r11)",                             "N",       "direct",     "DONupt",
+  "NH4 exchange (r13)",                                 "N",       "direct",     "NH4upt",
+  "NO3 release (r14)",                                  "N",       "direct",     "NO3rel",
+  "NO2 exchange (r15)",                                 "N",       "direct",     "NO2upt",
+  "N2 release (r17)",                                   "N",       "direct",     "N2rel",
+
+  "Oxygen uptake (r12)",                                "O2",      "direct",     "Oxyupt",
+
+  "Production efficiency on DOC (C)",                   "%",       "ratio_pct",  "prod_eff_doc_c",
+  "Production efficiency (total input) (C)",            "%",       "ratio_pct",  "prod_eff_total_c",
+  "Production efficiency (total input) (N)",            "%",       "ratio_pct",  "prod_eff_total_n",
+  "Fraction microbial production to total production (C)", "%",     "ratio_pct",  "frac_microbial_c",
+  "Fraction microbial production to total production (N)", "%",     "ratio_pct",  "frac_microbial_n",
+  "Fraction chemoautotrophy to total production (C)",   "%",       "ratio_pct",  "frac_chemo_c",
+  "Fraction chemoautotrophy to total production (N)",   "%",       "ratio_pct",  "frac_chemo_n",
+  "Fraction denitrification to nitrification",          "%",       "ratio_pct",  "frac_denit_to_nitrif",
+  "Fraction DNRA to nitrification",                     "%",       "ratio_pct",  "frac_dnra_to_nitrif",
+  "Apparent CO2:O2 exchange ratio",                     "%",       "ratio_raw",  "co2_o2_ratio"
+)
+
+# ---- build vectors for all requested metrics ----
+nitrif_total_N <- df_flux$nitr_NH4 + df_flux$nitr_NO2
+
+microbial_prod_C <- df_flux$r2_CProd_DOC +
+  df_flux$r3_CProd_denit +
+  df_flux$r4_CProd_DNRA +
+  (df_flux$biomassprod_nitrif + df_flux$biomassprod_anammox) * df_flux$CN_Spo
+
+microbial_prod_N <- safe_div(
+  df_flux$r2_CProd_DOC + df_flux$r3_CProd_denit + df_flux$r4_CProd_DNRA,
+  df_flux$CN_Spo
+) + df_flux$biomassprod_nitrif + df_flux$biomassprod_anammox
+
+chemoauto_prod_C <- (df_flux$biomassprod_nitrif + df_flux$biomassprod_anammox) * df_flux$CN_Spo
+chemoauto_prod_N <- df_flux$biomassprod_nitrif + df_flux$biomassprod_anammox
+
+extra_value_list <- list(
+  BacCupt = df_flux$BacCupt,
+  DOCupt = df_flux$DOCupt,
+  r3_CProd_denit = df_flux$r3_CProd_denit,
+  r4_CProd_DNRA = df_flux$r4_CProd_DNRA,
+  prod_nitrif_C = df_flux$biomassprod_nitrif * df_flux$CN_Spo,
+  prod_anammox_C = df_flux$biomassprod_anammox * df_flux$CN_Spo,
+  r10_totCprod = df_flux$r10_totCprod,
+  CO2rel = df_flux$CO2rel,
+
+  BacNupt = df_flux$BacNupt,
+  DONupt = df_flux$DONupt,
+  denit = df_flux$denit,
+  DNRA = df_flux$DNRA,
+  nitr_NH4 = df_flux$nitr_NH4,
+  nitr_NO2 = df_flux$nitr_NO2,
+  biomassprod_nitrif = df_flux$biomassprod_nitrif,
+  anammox = df_flux$anammox,
+  biomassprod_anammox = df_flux$biomassprod_anammox,
+  Prod = df_flux$Prod,
+  NH4upt = df_flux$NH4upt,
+  NO3rel = df_flux$NO3rel,
+  NO2upt = df_flux$NO2upt,
+  N2rel = df_flux$N2rel,
+
+  Oxyupt = df_flux$Oxyupt,
+
+  prod_eff_doc_c = safe_div(df_flux$r2_CProd_DOC, df_flux$DOCupt) * 100,
+  prod_eff_total_c = safe_div(df_flux$r10_totCprod, df_flux$DOCupt + df_flux$BacCupt) * 100,
+  prod_eff_total_n = safe_div(df_flux$Prod, df_flux$DONupt + df_flux$BacNupt) * 100,
+  frac_microbial_c = safe_div(microbial_prod_C, df_flux$r10_totCprod) * 100,
+  frac_microbial_n = safe_div(microbial_prod_N, df_flux$Prod) * 100,
+  frac_chemo_c = safe_div(chemoauto_prod_C, df_flux$r10_totCprod) * 100,
+  frac_chemo_n = safe_div(chemoauto_prod_N, df_flux$Prod) * 100,
+  frac_denit_to_nitrif = safe_div(df_flux$denit, nitrif_total_N, min_den = 1e-4) * 100,
+  frac_dnra_to_nitrif = safe_div(df_flux$DNRA, nitrif_total_N, min_den = 1e-4) * 100,
+  co2_o2_ratio = safe_div(df_flux$CO2rel, df_flux$Oxyupt)
+)
+
+# ---- build final extra table ----
+extra_summary_table <- bind_rows(
+  lapply(seq_len(nrow(extra_table_spec)), function(i) {
+    this_row <- extra_table_spec[i, ]
+    vals <- extra_value_list[[this_row$col]]
+
+    make_summary_row(
+      parameter_name = this_row$Parameter,
+      currency_label = this_row$Currency,
+      values = vals
+    )
+  })
+) %>%
+  mutate(
+    across(c(Mean, Median, SD, `CI95%`, Min, Max), ~ round(.x, 3))
+  )
+
+# ---- save CSV ----
+write_csv(
+  extra_summary_table,
+  file.path(output_dir, "Table_extra_selected_parameters_with_CI95.csv")
+)
+
+# ---- optional: add to workbook too ----
+xlsx_file <- file.path(output_dir, "Summary_tables_from_accepted_outputs.xlsx")
+
+# If workbook already exists, load it; otherwise create a new one
+if (file.exists(xlsx_file)) {
+  wb <- loadWorkbook(xlsx_file)
+} else {
+  wb <- createWorkbook()
+}
+
+# Add sheet only if it does not already exist
+if (!"Extra_CI95_table" %in% names(wb)) {
+  addWorksheet(wb, "Extra_CI95_table")
+}
+
+# Write the table into the sheet
+writeData(wb, sheet = "Extra_CI95_table", x = extra_summary_table)
+
+# Save workbook
+saveWorkbook(wb, xlsx_file, overwrite = TRUE)
+
+# ==============================================================================
+# 13) SAVE CSV FILES
+# ==============================================================================
+write_csv(df_model,               file.path(output_dir, "accepted_model_level_output_rebuilt.csv"))
+write_csv(table1_like,            file.path(output_dir, "Table1_like_measured_constraints.csv"))
+write_csv(table2_like,            file.path(output_dir, "Table2_like_reactions_overview.csv"))
+write_csv(table2_parameters_like, file.path(output_dir, "Table2_like_parameters_summary.csv"))
+write_csv(table3_fluxes_like,     file.path(output_dir, "Table3_like_model_fluxes.csv"))
+write_csv(table3_fractions_like,  file.path(output_dir, "Table3_like_fractions_efficiencies.csv"))
+
+# ==============================================================================
+# 14) SAVE EXCEL
+# ==============================================================================
+wb <- createWorkbook()
+
+header_style <- createStyle(
+  textDecoration = "bold",
+  halign = "center",
+  border = "Bottom"
+)
+
+write_sheet <- function(wb, sheet_name, data) {
+  addWorksheet(wb, sheet_name)
+  writeData(wb, sheet_name, data)
+  addStyle(
+    wb, sheet = sheet_name, style = header_style,
+    rows = 1, cols = 1:ncol(data), gridExpand = TRUE
+  )
+  setColWidths(wb, sheet = sheet_name, cols = 1:ncol(data), widths = "auto")
+  freezePane(wb, sheet = sheet_name, firstRow = TRUE)
+  addFilter(wb, sheet = sheet_name, row = 1, cols = 1:ncol(data))
+}
+
+write_sheet(wb, "Table1_like", table1_like)
+write_sheet(wb, "Table2_reactions", table2_like)
+write_sheet(wb, "Table2_parameters", table2_parameters_like)
+write_sheet(wb, "Table3_fluxes", table3_fluxes_like)
+write_sheet(wb, "Table3_fractions", table3_fractions_like)
+
+safe_temp_root <- file.path(output_dir, "temp_openxlsx")
+if (!dir.exists(safe_temp_root)) {
+  dir.create(safe_temp_root, recursive = TRUE)
+}
+
+old_tmp <- Sys.getenv("TMPDIR", unset = "")
+Sys.setenv(TMPDIR = safe_temp_root)
+
+excel_path <- file.path(output_dir, "Model_tables_like_paper.xlsx")
+
+excel_saved <- tryCatch({
+  saveWorkbook(wb, excel_path, overwrite = TRUE)
+  TRUE
+}, error = function(e) {
+  message("Excel export failed: ", e$message)
+  FALSE
+})
+
+if (nzchar(old_tmp)) {
+  Sys.setenv(TMPDIR = old_tmp)
+}
+
+if (excel_saved) {
+  cat("\nExcel workbook saved successfully:\n", excel_path, "\n", sep = "")
+} else {
+  cat(
+    "\nExcel workbook was NOT saved.\n",
+    "CSV files were created successfully, but openxlsx failed during workbook export.\n",
+    sep = ""
+  )
+}
+
+cat(
+  "\nFiles saved to:\n", output_dir, "\n",
+  "Accepted model rows rebuilt: ", nrow(df_model), "\n",
+  "Accepted parameter rows: ", nrow(df_par), "\n",
+  "Accepted raw flux rows: ", nrow(df_flux_raw), "\n\n",
+  sep = ""
+)
+
+
+```
+
+
+
+### Compare model fluxes and literature values
+
+```{r, fig.width=16, fig.height=16}
+
+
+# ==============================================================================
+# Compare model fluxes and literature values
+# ------------------------------------------------------------------------------
+# PURPOSE
+# Build comparison figures for metabolic fluxes by combining:
+# 1) Agelas model output
+# 2) Chondrosia reniformis model output
+# 3) Dysidea avara model output
+# 4) Agelas measured data
+# 5) Literature values from de Kluijver et al. (2021) for Geodia
+#
+# MAIN GOALS
+# - Read model-derived Table3 summary files from model output folders
+# - Read measured Agelas summary data
+# - Convert measured NOX into NO2 and NO3 using Kluijver partition fractions
+# - Standardize metric names and assign each flux to a flow category
+#   (Input, Internal, Output)
+# - Harmonize currencies across datasets (C, N, O2)
+# - Plot all datasets as bars with error bars
+# - Produce separate comparison panels for C, N, and O2
+#
+# IMPORTANT LOGIC
+# - Agelas, Chondrosia, and Dysidea are read from your model folders
+# - Geodia is NOT read from a model folder; it is entered manually from literature
+# - Agelas measured remains the real measured dataset
+#
+# ERROR BAR LOGIC
+# - Agelas model:        Mean ± CI95 (calculated from Mean, SD, and N_nonNA)
+# - Chondrosia model:    Mean ± CI95 (calculated from Mean, SD, and N_nonNA)
+# - Dysidea model:       Mean ± CI95 (calculated from Mean, SD, and N_nonNA)
+# - Agelas measured:     Mean ± CI95
+# - Geodia model:        Mean ± SD (as reported in the paper)
+# ==============================================================================
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(tibble)
+library(patchwork)
+library(grid)
+
+# ------------------------------------------------------------------------------
+# 1) USER INPUT
+# ------------------------------------------------------------------------------
+# Folder containing Agelas Table3 output
+agelas_tables_dir <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260406_105009/tables_from_accepted_outputs"
+
+# Folder containing Chondrosia Table3 output
+chondrosia_tables_dir <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260406_153814/tables_from_accepted_outputs"
+
+# Folder containing Dysidea Table3 output
+dysidea_tables_dir <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260406_100935/tables_from_accepted_outputs"
+
+# Measured summary table for Agelas
+agelas_measured_file <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/Energy_budget/Summary_tables/Agelas_oroides/SUMMARY_Agelas_S6_NEuk_allometric_C_plus_Redfield_N_volnorm.csv"
+
+# Output file name
+output_figure_name <- "combined_flux_comparison_panel_with_dysidea.png"
+
+# ------------------------------------------------------------------------------
+# 2) GLOBAL METRIC ORDER
+# ------------------------------------------------------------------------------
+metric_order <- c(
+  "Bacteria assimilation (r1)",
+  "Dissolved organic matter assimilation (r2)",
+  "Oxygen uptake (r12)",
+  "Denitrification (r3)",
+  "DNRA (r4)",
+  "NH4 oxidation (r5)",
+  "NO2 oxidation (r6)",
+  "Production - nitrification (r7)",
+  "Anammox (r8)",
+  "Production - anammox (r9)",
+  "Production (r10)",
+  "Total DOM uptake (r11)",
+  "NH4 exchange (r13)",
+  "NO2 exchange (r15)",
+  "NO3 release (r14)",
+  "CO2 release (r16)",
+  "N2 release (r17)"
+)
+
+# ------------------------------------------------------------------------------
+# 3) HELPER FUNCTION:
+#    find the Table3_like_model_fluxes file inside a folder
+# ------------------------------------------------------------------------------
+find_table3_file <- function(tables_dir) {
+  
+  files <- list.files(
+    path = tables_dir,
+    pattern = "Table3_like_model_fluxes\\.csv$",
+    full.names = TRUE
+  )
+  
+  if (length(files) == 0) {
+    stop("No Table3_like_model_fluxes.csv file found in:\n", tables_dir)
+  }
+  
+  if (length(files) > 1) {
+    message("More than one matching Table3 file found. Using the first one:\n", files[1])
+  }
+  
+  files[1]
+}
+
+# ------------------------------------------------------------------------------
+# 4) HELPER FUNCTION:
+#    calculate CI95 half-width from Mean, SD, and n
+# ------------------------------------------------------------------------------
+calc_ci95_halfwidth <- function(mean, sd, n) {
+  ifelse(
+    is.na(mean) | is.na(sd) | is.na(n) | n < 2,
+    NA_real_,
+    qt(0.975, df = n - 1) * sd / sqrt(n)
+  )
+}
+
+# ------------------------------------------------------------------------------
+# 5) HELPER FUNCTION:
+#    read one model table from folder and prepare it for plotting
+# ------------------------------------------------------------------------------
+# For Agelas, Chondrosia, and Dysidea, uncertainty is shown as true CI95
+# calculated from Mean, SD, and N_nonNA.
+read_model_from_folder <- function(tables_dir, dataset_name) {
+  
+  model_file <- find_table3_file(tables_dir)
+  model_df <- read_csv(model_file, show_col_types = FALSE)
+  
+  required_cols <- c("Metric", "Currency", "Mean", "SD", "N_nonNA")
+  missing_cols <- setdiff(required_cols, names(model_df))
+  
+  if (length(missing_cols) > 0) {
+    stop(
+      "The model file is missing required columns needed for CI95:\n",
+      paste(missing_cols, collapse = ", "),
+      "\nFile used:\n",
+      model_file
+    )
+  }
+  
+  model_df %>%
+    mutate(
+      Flow_category = case_when(
+        Metric %in% c(
+          "Bacteria assimilation (r1)",
+          "Dissolved organic matter assimilation (r2)",
+          "Oxygen uptake (r12)"
+        ) ~ "Input",
+        
+        Metric %in% c(
+          "NO3 release (r14)",
+          "CO2 release (r16)",
+          "N2 release (r17)"
+        ) ~ "Output",
+        
+        Metric %in% c(
+          "Denitrification (r3)",
+          "DNRA (r4)",
+          "NH4 oxidation (r5)",
+          "NO2 oxidation (r6)",
+          "Production - nitrification (r7)",
+          "Anammox (r8)",
+          "Production - anammox (r9)",
+          "Production (r10)",
+          "Total DOM uptake (r11)",
+          "NH4 exchange (r13)",
+          "NO2 exchange (r15)"
+        ) ~ "Internal",
+        
+        TRUE ~ NA_character_
+      ),
+      
+      # Use the available sample count column from the summary table
+      n_for_ci = N_nonNA,
+      
+      # Plot absolute flux values to preserve the current figure design
+      Mean_abs = abs(Mean),
+      
+      # True 95% confidence interval half-width
+      CI95_half = calc_ci95_halfwidth(mean = Mean, sd = SD, n = n_for_ci),
+      
+      # Symmetric CI around the plotted absolute mean
+      CI_low  = pmax(0, Mean_abs - CI95_half),
+      CI_high = Mean_abs + CI95_half,
+      
+      Dataset = dataset_name
+    ) %>%
+    filter(!is.na(Flow_category)) %>%
+    mutate(
+      Flow_category = factor(Flow_category, levels = c("Input", "Internal", "Output")),
+      Currency = factor(Currency, levels = c("C", "N", "O2")),
+      Metric = factor(Metric, levels = metric_order)
+    )
+}
+
+# ------------------------------------------------------------------------------
+# 6) READ MEASURED AGELAS DATA AND PREPARE FOR PLOTTING
+# ------------------------------------------------------------------------------
+measured_df <- read_csv(agelas_measured_file, show_col_types = FALSE)
+
+required_measured_cols <- c(
+  "parameter",
+  "FluxVol_day_mean (µmol day^-1 cm^-3)",
+  "FluxVol_day_ci95 (µmol day^-1 cm^-3)"
+)
+
+missing_measured_cols <- setdiff(required_measured_cols, names(measured_df))
+
+if (length(missing_measured_cols) > 0) {
+  stop(
+    "Measured file is missing required columns:\n",
+    paste(missing_measured_cols, collapse = ", "),
+    "\nFile used:\n",
+    agelas_measured_file
+  )
+}
+
+# ------------------------------------------------------------------------------
+# 6A) Helpers for NOx partition from Kluijver et al. (2020)
+# ------------------------------------------------------------------------------
+orig_NO2 <- -0.114
+orig_NO3 <- -1.356
+
+frac_NO2_from_NOx <- abs(orig_NO2) / (abs(orig_NO2) + abs(orig_NO3))
+frac_NO3_from_NOx <- abs(orig_NO3) / (abs(orig_NO2) + abs(orig_NO3))
+
+# ------------------------------------------------------------------------------
+# 6B) Expand NOX into NO2 and NO3 for measured Agelas data
+# ------------------------------------------------------------------------------
+measured_df_expanded <- bind_rows(
+  
+  measured_df,
+  
+  measured_df %>%
+    filter(parameter == "NOX") %>%
+    mutate(
+      parameter = "NO2",
+      `FluxVol_day_mean (µmol day^-1 cm^-3)` =
+        `FluxVol_day_mean (µmol day^-1 cm^-3)` * frac_NO2_from_NOx,
+      `FluxVol_day_ci95 (µmol day^-1 cm^-3)` =
+        `FluxVol_day_ci95 (µmol day^-1 cm^-3)` * frac_NO2_from_NOx
+    ),
+  
+  measured_df %>%
+    filter(parameter == "NOX") %>%
+    mutate(
+      parameter = "NO3",
+      `FluxVol_day_mean (µmol day^-1 cm^-3)` =
+        `FluxVol_day_mean (µmol day^-1 cm^-3)` * frac_NO3_from_NOx,
+      `FluxVol_day_ci95 (µmol day^-1 cm^-3)` =
+        `FluxVol_day_ci95 (µmol day^-1 cm^-3)` * frac_NO3_from_NOx
+    )
+)
+
+# ------------------------------------------------------------------------------
+# 6C) Standardize measured data to model-like metric names
+# ------------------------------------------------------------------------------
+measured_plot <- measured_df_expanded %>%
+  mutate(
+    Metric = case_when(
+      parameter %in% c("NEuk_C", "PEuk_C", "Pro_C", "Syn_C") ~ "Bacteria assimilation (r1)",
+      parameter %in% c("NEuk_N", "PEuk_N", "Pro_N", "Syn_N") ~ "Bacteria assimilation (r1)",
+      parameter %in% c("DOC", "DON") ~ "Dissolved organic matter assimilation (r2)",
+      parameter == "O2" ~ "Oxygen uptake (r12)",
+      parameter == "DIC_pH" ~ "CO2 release (r16)",
+      parameter == "NH4" ~ "NH4 exchange (r13)",
+      parameter == "NO2" ~ "NO2 exchange (r15)",
+      parameter == "NO3" ~ "NO3 release (r14)",
+      TRUE ~ NA_character_
+    ),
+    Currency = case_when(
+      parameter %in% c("NEuk_C", "PEuk_C", "Pro_C", "Syn_C", "DOC", "DIC_pH") ~ "C",
+      parameter %in% c("NEuk_N", "PEuk_N", "Pro_N", "Syn_N", "DON", "NH4", "NO2", "NO3") ~ "N",
+      parameter == "O2" ~ "O2",
+      TRUE ~ NA_character_
+    ),
+    Flow_category = case_when(
+      Metric %in% c(
+        "Bacteria assimilation (r1)",
+        "Dissolved organic matter assimilation (r2)",
+        "Oxygen uptake (r12)"
+      ) ~ "Input",
+      Metric %in% c(
+        "NO3 release (r14)",
+        "CO2 release (r16)"
+      ) ~ "Output",
+      Metric %in% c(
+        "NH4 exchange (r13)",
+        "NO2 exchange (r15)"
+      ) ~ "Internal",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Metric), !is.na(Currency), !is.na(Flow_category)) %>%
+  group_by(Metric, Currency, Flow_category) %>%
+  summarise(
+    Mean_abs = sum(abs(`FluxVol_day_mean (µmol day^-1 cm^-3)`), na.rm = TRUE),
+    CI95_abs = sum(abs(`FluxVol_day_ci95 (µmol day^-1 cm^-3)`), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    CI_low = pmax(0, Mean_abs - CI95_abs),
+    CI_high = Mean_abs + CI95_abs,
+    Flow_category = factor(Flow_category, levels = c("Input", "Internal", "Output")),
+    Currency = factor(Currency, levels = c("C", "N", "O2")),
+    Metric = factor(Metric, levels = metric_order),
+    Dataset = "Agelas measured"
+  )
+
+# ------------------------------------------------------------------------------
+# 7) READ MODEL TABLES
+# ------------------------------------------------------------------------------
+agelas_model_plot <- read_model_from_folder(
+  tables_dir = agelas_tables_dir,
+  dataset_name = "Agelas model"
+)
+
+chondrosia_model_plot <- read_model_from_folder(
+  tables_dir = chondrosia_tables_dir,
+  dataset_name = "Chondrosia model"
+)
+
+dysidea_model_plot <- read_model_from_folder(
+  tables_dir = dysidea_tables_dir,
+  dataset_name = "Dysidea model"
+)
+
+# ------------------------------------------------------------------------------
+# 8) LITERATURE MODEL VALUES:
+#    Smaller sponges from de Kluijver et al. (2021)
+# ------------------------------------------------------------------------------
+paper_small_model <- tibble::tribble(
+  ~Metric,                                  ~Currency, ~Flow_category, ~Mean_abs, ~SD_abs,
+  "Bacteria assimilation (r1)",             "C",       "Input",         abs(0.15),   abs(0.090),
+  "Bacteria assimilation (r1)",             "N",       "Input",         abs(0.031),  abs(0.019),
+  "Dissolved organic matter assimilation (r2)", "C",   "Input",         abs(14.0),   abs(4.5),
+  "Dissolved organic matter assimilation (r2)", "N",   "Input",         abs(1.9),    abs(0.74),
+  "Denitrification (r3)",                   "C",       "Internal",      abs(0.81),   abs(0.62),
+  "Denitrification (r3)",                   "N",       "Internal",      abs(0.47),   abs(0.35),
+  "DNRA (r4)",                              "C",       "Internal",      abs(4.5),    abs(2.7),
+  "DNRA (r4)",                              "N",       "Internal",      abs(1.9),    abs(1.1),
+  "NH4 oxidation (r5)",                     "N",       "Internal",      abs(3.0),    abs(1.2),
+  "NO2 oxidation (r6)",                     "N",       "Internal",      abs(2.9),    abs(1.2),
+  "Production - nitrification (r7)",        "C",       "Internal",      abs(0.28),   abs(0.13),
+  "Production - nitrification (r7)",        "N",       "Internal",      abs(0.067),  abs(0.032),
+  "Anammox (r8)",                           "N",       "Internal",      abs(0.011),  abs(0.0094),
+  "Production (r10)",                       "C",       "Internal",      abs(6.5),    abs(2.9),
+  "Production (r10)",                       "N",       "Internal",      abs(1.5),    abs(0.68),
+  "Total DOM uptake (r11)",                 "C",       "Internal",      abs(19.3),   abs(4.0),
+  "Total DOM uptake (r11)",                 "N",       "Internal",      abs(2.6),    abs(0.79),
+  "Oxygen uptake (r12)",                    "O2",      "Input",         abs(15.8),   abs(2.5),
+  "NH4 exchange (r13)",                     "N",       "Internal",      abs(0.017),  abs(0.26),
+  "NO3 release (r14)",                      "N",       "Output",        abs(-0.59),  abs(0.32),
+  "NO2 exchange (r15)",                     "N",       "Internal",      abs(-0.022), abs(0.027),
+  "CO2 release (r16)",                      "C",       "Output",        abs(-12.9),  abs(2.1),
+  "N2 release (r17)",                       "N",       "Output",        abs(-0.49),  abs(0.37)
+) %>%
+  mutate(
+    CI_low = pmax(0, Mean_abs - SD_abs),
+    CI_high = Mean_abs + SD_abs,
+    Flow_category = factor(Flow_category, levels = c("Input", "Internal", "Output")),
+    Currency = factor(Currency, levels = c("C", "N", "O2")),
+    Metric = factor(Metric, levels = metric_order),
+    Dataset = "Geodia model"
+  )
+
+# ------------------------------------------------------------------------------
+# 9) OPTIONAL OVERLAY FIGURE
+# ------------------------------------------------------------------------------
+pd_overlay <- position_dodge(width = 0.72)
+
+p_overlay <- ggplot(
+  agelas_model_plot,
+  aes(x = Metric, y = Mean_abs, fill = Currency, group = Currency)
+) +
+  geom_col(width = 0.72, position = pd_overlay, color = NA) +
+  geom_errorbar(
+    aes(
+      ymin = CI_low,
+      ymax = CI_high,
+      color = Currency
+    ),
+    width = 0.18,
+    linewidth = 0.7,
+    position = pd_overlay,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    data = measured_plot,
+    aes(x = Metric, y = Mean_abs, group = Currency),
+    inherit.aes = FALSE,
+    position = pd_overlay,
+    shape = 23,
+    size = 3.1,
+    fill = "black",
+    color = "white",
+    stroke = 0.5
+  ) +
+  geom_errorbar(
+    data = measured_plot,
+    aes(
+      x = Metric,
+      ymin = CI_low,
+      ymax = CI_high,
+      group = Currency
+    ),
+    inherit.aes = FALSE,
+    position = pd_overlay,
+    width = 0.12,
+    linewidth = 0.6,
+    color = "black"
+  ) +
+  geom_point(
+    data = paper_small_model,
+    aes(x = Metric, y = Mean_abs, group = Currency),
+    inherit.aes = FALSE,
+    position = pd_overlay,
+    shape = 21,
+    size = 3.0,
+    fill = "#D95F5F",
+    color = "white",
+    stroke = 0.5
+  ) +
+  geom_errorbar(
+    data = paper_small_model,
+    aes(
+      x = Metric,
+      ymin = CI_low,
+      ymax = CI_high,
+      group = Currency
+    ),
+    inherit.aes = FALSE,
+    position = pd_overlay,
+    width = 0.10,
+    linewidth = 0.6,
+    color = "#D95F5F"
+  ) +
+  facet_wrap(~ Flow_category, scales = "free") +
+  scale_fill_manual(
+    values = c(
+      "C"  = "#BFE3C0",
+      "N"  = "#D6C2F0",
+      "O2" = "#BFDDF5"
+    )
+  ) +
+  scale_color_manual(
+    values = c(
+      "C"  = "#7EAF80",
+      "N"  = "#9E84CC",
+      "O2" = "#6EA7D1"
+    )
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_rect(fill = "white", colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  ) +
+  labs(
+    x = "Metric",
+    y = expression(paste("Absolute flux (", mu, "mol day"^-1, " cm"^-3, ")")),
+    fill = "Currency",
+    title = "Model fluxes with measured and literature values overlaid"
+  )
+
+p_overlay
+
+# ------------------------------------------------------------------------------
+# 10) COMBINE DATASETS FOR BAR COMPARISON
+# ------------------------------------------------------------------------------
+bars_all_df <- bind_rows(
+  
+  agelas_model_plot %>%
+    transmute(
+      Metric, Currency, Flow_category,
+      Mean_abs,
+      CI_low,
+      CI_high,
+      Dataset
+    ),
+  
+  chondrosia_model_plot %>%
+    transmute(
+      Metric, Currency, Flow_category,
+      Mean_abs,
+      CI_low,
+      CI_high,
+      Dataset
+    ),
+  
+  dysidea_model_plot %>%
+    transmute(
+      Metric, Currency, Flow_category,
+      Mean_abs,
+      CI_low,
+      CI_high,
+      Dataset
+    ),
+  
+  paper_small_model %>%
+    transmute(
+      Metric, Currency, Flow_category,
+      Mean_abs,
+      CI_low,
+      CI_high,
+      Dataset
+    )
+  
+) %>%
+  mutate(
+    Dataset = factor(
+      Dataset,
+      levels = c(
+        "Agelas model",
+        "Chondrosia model",
+        "Dysidea model",
+        "Geodia model"
+      )
+    )
+  )
+
+# ------------------------------------------------------------------------------
+# 11) METRIC ORDER PER CURRENCY
+# ------------------------------------------------------------------------------
+metric_order_C <- c(
+  "Bacteria assimilation (r1)",
+  "Dissolved organic matter assimilation (r2)",
+  "Denitrification (r3)",
+  "DNRA (r4)",
+  "Production - nitrification (r7)",
+  "Production - anammox (r9)",
+  "Production (r10)",
+  "Total DOM uptake (r11)",
+  "CO2 release (r16)"
+)
+
+metric_order_N <- c(
+  "Bacteria assimilation (r1)",
+  "Dissolved organic matter assimilation (r2)",
+  "Denitrification (r3)",
+  "DNRA (r4)",
+  "NH4 oxidation (r5)",
+  "NO2 oxidation (r6)",
+  "Production - nitrification (r7)",
+  "Anammox (r8)",
+  "Production - anammox (r9)",
+  "Production (r10)",
+  "Total DOM uptake (r11)",
+  "NH4 exchange (r13)",
+  "NO2 exchange (r15)",
+  "NO3 release (r14)",
+  "N2 release (r17)"
+)
+
+metric_order_O2 <- c(
+  "Oxygen uptake (r12)"
+)
+
+# ------------------------------------------------------------------------------
+# 12) BAR PLOT FUNCTION WITH CONTROLLED Y SCALES
+# ------------------------------------------------------------------------------
+
+# Shared scale for Carbon + Oxygen panels
+shared_CO2_limit <- max(
+  bars_all_df %>%
+    filter(Currency %in% c("C", "O2")) %>%
+    pull(CI_high),
+  na.rm = TRUE
+)
+
+# Separate shared scale for Nitrogen panel
+shared_N_limit <- max(
+  bars_all_df %>%
+    filter(Currency == "N") %>%
+    pull(CI_high),
+  na.rm = TRUE
+)
+
+make_bar_plot <- function(currency_filter,
+                          metric_order_use,
+                          title_text,
+                          y_limit) {
+  
+  plot_df <- bars_all_df %>%
+    filter(Currency == currency_filter, Metric %in% metric_order_use) %>%
+    mutate(Metric = factor(Metric, levels = metric_order_use))
+  
+  pd <- position_dodge(width = 0.82)
+  
+  ggplot(plot_df, aes(x = Metric, y = Mean_abs, fill = Dataset)) +
+    geom_col(
+      width = 0.76,
+      position = pd
+    ) +
+    geom_errorbar(
+      aes(
+        ymin = CI_low,
+        ymax = CI_high,
+        color = Dataset
+      ),
+      width = 0.15,
+      linewidth = 0.6,
+      position = pd,
+      show.legend = FALSE
+    ) +
+    facet_wrap(~ Flow_category, scales = "free_x", nrow = 1) +
+    coord_cartesian(ylim = c(0, y_limit)) +
+    scale_fill_manual(
+      values = c(
+        "Agelas model"     = "#A8D8F0",
+        "Chondrosia model" = "#BFE3C0",
+        "Dysidea model"    = "#F2D39B",
+        "Geodia model"     = "#F3C4D0"
+      ),
+      labels = c(
+        "Agelas model"     = "Agelas oroides",
+        "Chondrosia model" = "Chondrosia reniformis",
+        "Dysidea model"    = "Dysidea avara",
+        "Geodia model"     = "Geodia barretti"
+      )
+    ) +
+    scale_color_manual(
+      values = c(
+        "Agelas model"     = "#7FB8D8",
+        "Chondrosia model" = "#8FBF91",
+        "Dysidea model"    = "#D8B36F",
+        "Geodia model"     = "#D99AAA"
+      )
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.background = element_rect(fill = "white", colour = "black"),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      legend.position = "right",
+      legend.text = element_text(face = "italic"),
+      plot.title = element_text(face = "bold")
+    ) +
+    labs(
+      x = NULL,
+      y = expression(paste("Absolute flux (", mu, "mol day"^-1, " cm"^-3, ")")),
+      fill = NULL,
+      title = title_text
+    )
+}
+
+# ------------------------------------------------------------------------------
+# 13) BUILD PLOTS
+# ------------------------------------------------------------------------------
+
+p_C <- make_bar_plot(
+  currency_filter = "C",
+  metric_order_use = metric_order_C,
+  title_text = "Carbon fluxes comparison",
+  y_limit = shared_CO2_limit
+)
+
+p_N <- make_bar_plot(
+  currency_filter = "N",
+  metric_order_use = metric_order_N,
+  title_text = "Nitrogen fluxes comparison",
+  y_limit = shared_N_limit
+)
+
+p_O2 <- make_bar_plot(
+  currency_filter = "O2",
+  metric_order_use = metric_order_O2,
+  title_text = "Oxygen flux comparison",
+  y_limit = shared_CO2_limit
+)
+
+# ------------------------------------------------------------------------------
+# 14) PRINT INDIVIDUAL PLOTS
+# ------------------------------------------------------------------------------
+p_C
+p_N
+p_O2
+
+# ------------------------------------------------------------------------------
+# 15) COMBINE THE THREE PLOTS INTO ONE MULTI-PANEL FIGURE
+# ------------------------------------------------------------------------------
+o2_row <- (
+  p_O2 | guide_area()
+) +
+  plot_layout(widths = c(0.3, 0.3, 0.3), guides = "collect")
+
+combined_panel <- (
+  (p_C + theme(legend.position = "none")) /
+  (p_N + theme(legend.position = "none")) /
+  o2_row
+) +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(
+    heights = c(1, 1, 1)
+  ) +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 15),
+    legend.title = element_text(size = 15),
+    legend.spacing.y = unit(0.7, "cm")
+  ) +
+  guides(
+    fill = guide_legend(
+      keywidth = unit(3, "lines"),
+      keyheight = unit(3, "lines")
+    )
+  )
+
+combined_panel
+
+# ------------------------------------------------------------------------------
+# 16) SAVE FIGURE
+# ------------------------------------------------------------------------------
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Chapter_4/Energy_budget/LIM png/Compare_model_fluxes.png",
+  plot = combined_panel,
+  width = 16,
+  height = 16,
+  dpi = 300
+)
+
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Chapter_4/Energy_budget/LIM png/Compare_model_fluxes.svg",
+  plot = combined_panel,
+  width = 16,
+  height = 16,
+  dpi = 300
+)
+
+```
+
+
+### Compare model results vs direct measurements for the 3 study species
+```{r, fig.width=16, fig.height=16}
+
+# ==============================================================================
+# Compare Model Fluxes vs. Measured Data for All Species
+# ------------------------------------------------------------------------------
+# PURPOSE:
+# 1) Load model outputs for Agelas, Chondrosia, and Dysidea.
+# 2) Load the combined measured summary file for all species.
+# 3) Harmonize naming and currencies.
+# 4) Create a side-by-side bar plot (Measured vs. Model).
+# ==============================================================================
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(patchwork)
+
+# ------------------------------------------------------------------------------
+# 1) PATHS & INPUTS
+# ------------------------------------------------------------------------------
+# Model directories (from your previous code)
+agelas_dir     <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260512_162324/tables_from_accepted_outputs"
+chondrosia_dir <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260406_153814/tables_from_accepted_outputs"
+dysidea_dir    <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260406_100935/tables_from_accepted_outputs"
+
+# New Measured summary file (All species)
+measured_all_file <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/Energy_budget/Summary_tables/All_3_species_recalc_flux_with_all_volumes/SUMMARY_ALLSPECIES_S6_NEuk_allometric_C_plus_Redfield_N_recalc_flux_allvol.csv"
+
+# ------------------------------------------------------------------------------
+# 2) HELPER: READ MODEL DATA
+# ------------------------------------------------------------------------------
+# We extract Mean and the Q05-Q95 range as the "Model" uncertainty
+read_and_label_model <- function(path, species_name) {
+  file_path <- list.files(path, pattern = "Table3_like_model_fluxes\\.csv$", full.names = TRUE)[1]
+  read_csv(file_path, show_col_types = FALSE) %>%
+    transmute(
+      Species = species_name,
+      Metric,
+      Currency,
+      Value = abs(Mean),
+      Low   = abs(Q05),
+      High  = abs(Q95),
+      Source = "Model"
+    )
+}
+
+model_data <- bind_rows(
+  read_and_label_model(agelas_dir, "A. oroides"),
+  read_and_label_model(chondrosia_dir, "C. reniformis"),
+  read_and_label_model(dysidea_dir, "D. avara")
+)
+
+# ------------------------------------------------------------------------------
+# 3) READ & PROCESS MEASURED DATA - גרסה חסינה
+# ------------------------------------------------------------------------------
+measured_raw <- read_csv(measured_all_file, show_col_types = FALSE)
+
+measured_processed <- measured_raw %>%
+  mutate(
+    # הפיכת הפרמטר לאותיות גדולות למניעת בעיות איות
+    p_upper = toupper(parameter), 
+    
+    Metric = case_when(
+      p_upper %in% c("NEUK_C", "PEUK_C", "PRO_C", "SYN_C", "NEUK_N", "PEUK_N", "PRO_N", "SYN_N") ~ "Planktonic cells assimilation (r1)",
+      p_upper %in% c("DOC", "DON") ~ "Dissolved organic matter assimilation (r2)",
+      p_upper == "O2"  ~ "Oxygen uptake (r12)",
+      p_upper %in% c("DIC_PH", "DIC") ~ "CO2 release (r16)",
+      p_upper == "NH4" ~ "NH4 exchange (r13)",
+      
+      # כאן אנחנו תופסים את כל הווריאציות של NOX או NO3 מהמדידות
+      p_upper %in% c("NOX", "NO3") ~ "NO3 release (r14)", 
+      
+      TRUE ~ NA_character_
+    ),
+    Currency = case_when(
+      grepl("_C$|DOC|DIC", p_upper) ~ "C",
+      grepl("_N$|DON|NH4|NOX|NO3", p_upper) ~ "N",
+      p_upper == "O2" ~ "O2",
+      TRUE ~ NA_character_
+    ),
+    Species = case_when(
+      grepl("Agelas", species, ignore.case = TRUE) ~ "A. oroides",
+      grepl("Chondrosia", species, ignore.case = TRUE) ~ "C. reniformis",
+      grepl("Dysidea", species, ignore.case = TRUE) ~ "D. avara",
+      TRUE ~ species
+    )
+  ) %>%
+  filter(!is.na(Metric)) %>%
+  group_by(Species, Metric, Currency) %>%
+  summarise(
+    Value = sum(abs(`FluxVol_day_mean (µmol day^-1 cm^-3)`)),
+    Err   = sum(abs(`FluxVol_day_ci95 (µmol day^-1 cm^-3)`)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Low = pmax(0, Value - Err),
+    High = Value + Err,
+    Source = "Measured"
+  )
+
+# --- בדיקה מהירה: האם ה-NO3 נכנס לטבלה המדודה? ---
+check_nox <- measured_processed %>% filter(grepl("NO3", Metric))
+print("בדיקת נתוני NO3 מדודים:")
+print(check_nox)
+
+
+
+# ------------------------------------------------------------------------------
+# 4) COMBINE AND FILTER FOR COMMON METRICS
+# ------------------------------------------------------------------------------
+# We only want to plot metrics that exist in BOTH datasets for a clean comparison
+final_df <- bind_rows(model_data, measured_processed) %>%
+  mutate(
+    Source = factor(Source, levels = c("Measured", "Model")),
+    Currency = factor(Currency, levels = c("C", "N", "O2"))
+  )
+
+
+# ------------------------------------------------------------------------------
+# 5) PRE-PROCESSING: HARMONIZING & FILTERING (Fixed for NO3 visibility)
+# ------------------------------------------------------------------------------
+final_df_finalized <- final_df %>%
+  # שלב א': איחוד שמות - כאן אנחנו מבטיחים ש-NOX ו-NO3 "ייפגשו" באותה מטריקה
+  mutate(Metric = case_when(
+    grepl("NOX|NO3", Metric, ignore.case = TRUE) ~ "NO3 release (r14)",
+    grepl("Bacteria", Metric) ~ "Planktonic cells assimilation (r1)",
+    TRUE ~ Metric
+  )) %>%
+  # שלב ב': קיצור שמות המינים
+  mutate(Species = case_when(
+    grepl("Agelas|A. oroides", Species) ~ "A. oroides",
+    grepl("Chondrosia|C. reniformis", Species) ~ "C. reniformis",
+    grepl("Dysidea|D. avara", Species) ~ "D. avara",
+    TRUE ~ Species
+  )) %>%
+  # שלב ג': סינון - רק מה שיש לו גם מודל וגם מדידות (חשוב: אחרי איחוד השמות!)
+  group_by(Metric, Currency) %>%
+  filter(any(Source == "Measured") & any(Source == "Model")) %>%
+  ungroup() %>%
+  # שלב ד': הסרת NO2 וניקוי
+  filter(!grepl("NO2", Metric)) %>%
+  # שלב ה': לוגיקת צבעי מילוי
+  mutate(fill_logic = ifelse(Source == "Measured", "white", 
+                            case_when(
+                              Species == "A. oroides" ~ "#A8D8F0",
+                              Species == "C. reniformis" ~ "#BFE3C0",
+                              Species == "D. avara" ~ "#F2D39B"
+                            )))
+
+
+# ------------------------------------------------------------------------------
+# FUNCTION: make_final_comparison_plot
+# ------------------------------------------------------------------------------
+# PURPOSE:
+# Create one panel (C / N / O2) with:
+# - white background
+# - no grid
+# - black panel border
+# - black strip border
+# ------------------------------------------------------------------------------
+
+make_final_comparison_plot <- function(currency_filter, title_text) {
+  
+  df_plot <- final_df_finalized %>%
+    filter(Currency == currency_filter) %>%
+    mutate(
+      Species = factor(Species, levels = c("A. oroides", "C. reniformis", "D. avara")),
+      Source  = factor(Source, levels = c("Measured", "Model"))
+    )
+  
+  ggplot(
+    df_plot,
+    aes(
+      x = Species,
+      y = Value,
+      fill = fill_logic,
+      colour = Species,
+      group = Source
+    )
+  ) +
+    
+    geom_col(
+      position = position_dodge(width = 0.7),
+      width = 0.6,
+      linewidth = 0.9
+    ) +
+    
+    geom_errorbar(
+      aes(ymin = Low, ymax = High),
+      position = position_dodge(width = 0.7),
+      width = 0.2,
+      linewidth = 0.8
+    ) +
+    
+    facet_wrap(~ Metric, scales = "free_y", ncol = 2)+
+    
+    scale_fill_identity() +
+    
+    scale_colour_manual(values = c(
+      "A. oroides"    = "#A8D8F0",
+      "C. reniformis" = "#BFE3C0",
+      "D. avara"      = "#F2D39B"
+    )) +
+    
+    labs(
+      x = NULL,
+      y = "Flux (µmol day⁻¹ cm⁻³)",
+      title = title_text
+    ) +
+    
+    theme_bw(base_size = 12) +
+    theme(
+      # remove all grids
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      
+      # white backgrounds
+      panel.background = element_rect(fill = "white", colour = "black", linewidth = 0.8),
+      plot.background  = element_rect(fill = "white", colour = NA),
+      strip.background = element_rect(fill = "white", colour = "black", linewidth = 0.8),
+      
+      # black border around each facet strip
+      strip.text = element_text(size = 12, colour = "black"),
+      
+      # axes
+      axis.text.x = element_text(size = 15, face = "italic", angle = 0, hjust = 0.5, colour = "black"),
+      axis.text.y = element_text(size = 15, colour = "black"),
+      axis.title.y = element_text(size = 17, colour = "black"),
+      axis.title.x = element_blank(),
+      axis.line = element_blank(),
+      axis.ticks = element_line(colour = "black"),
+      
+      # title
+      plot.title = element_text(size = 13, face = "bold", colour = "black"),
+      
+      # spacing
+      panel.spacing = unit(0.8, "lines"),
+      
+      # no legend here
+      legend.position = "none"
+    )
+}
+
+# ------------------------------------------------------------------------------
+# 6) יצירת הגרפים מחדש (חשוב להריץ את זה עכשיו!)
+# ------------------------------------------------------------------------------
+# הפונקציה עכשיו מוגדרת עם legend.position = "right" כדי לאפשר איסוף
+p_C  <- make_final_comparison_plot("C", "Carbon: Measured vs. Model")
+p_N  <- make_final_comparison_plot("N", "Nitrogen: Measured vs. Model")
+p_O2 <- make_final_comparison_plot("O2", "Oxygen: Measured vs. Model")
+
+# ------------------------------------------------------------------------------
+# 7A) CREATE A MANUAL LEGEND (FIXED - symmetric Model vs Measured)
+# ------------------------------------------------------------------------------
+
+legend_df <- data.frame(
+  x = 1,
+  y = c(3, 2, 1, 0, -1, -2),
+  type = c("Model", "Model", "Model",
+           "Measured", "Measured", "Measured"),
+  species = rep(c("A", "C", "D"), 2)
+)
+
+p_manual_legend <- ggplot() +
+  
+  # MODEL = filled squares
+  geom_point(
+    data = subset(legend_df, type == "Model"),
+    aes(x = x, y = y, fill = species),
+    shape = 22,
+    size = 5,
+    stroke = 0.8,
+    colour = "black"
+  ) +
+  
+  # MEASURED = empty squares
+  geom_point(
+    data = subset(legend_df, type == "Measured"),
+    aes(x = x, y = y, colour = species),
+    shape = 22,
+    size = 5,
+    stroke = 1.2,
+    fill = "white"
+  ) +
+  
+  # species colors
+  scale_fill_manual(values = c(
+    "A" = "#A8D8F0",
+    "C" = "#BFE3C0",
+    "D" = "#F2D39B"
+  )) +
+  
+  scale_colour_manual(values = c(
+    "A" = "#A8D8F0",
+    "C" = "#BFE3C0",
+    "D" = "#F2D39B"
+  )) +
+  
+  # labels
+  annotate("text", x = 1.4, y = 2,  label = "Model",    hjust = 0, size = 4.2) +
+  annotate("text", x = 1.4, y = -1, label = "Measured", hjust = 0, size = 4.2) +
+  
+  # clean appearance
+  xlim(0.8, 2.4) +
+  ylim(-2.5, 3.5) +
+  theme_void() +
+  theme(legend.position = "none")
+
+# ------------------------------------------------------------------------------
+# 7B) REMOVE AUTOMATIC LEGENDS FROM THE MAIN PANELS
+# ------------------------------------------------------------------------------
+
+p_C_clean  <- p_C  + theme(legend.position = "none")
+p_N_clean  <- p_N  + theme(legend.position = "none")
+p_O2_clean <- p_O2 + theme(legend.position = "none")
+
+# ------------------------------------------------------------------------------
+# 7C) BUILD THE BOTTOM ROW: PANEL C + MANUAL LEGEND
+# ------------------------------------------------------------------------------
+
+bottom_row <- ( p_O2_clean | p_manual_legend |plot_spacer() ) +
+  plot_layout(widths = c(0.5, 0.3, 0.2))
+
+# ------------------------------------------------------------------------------
+# 7D) COMBINE EVERYTHING INTO THE FINAL FIGURE
+# ------------------------------------------------------------------------------
+final_combined <- (
+  p_C_clean /
+  p_N_clean /
+  bottom_row
+) +
+  plot_layout(heights = c(1.35, 1.35, 0.675)) +
+  plot_annotation(tag_levels = "A")
+
+
+# ------------------------------------------------------------------------------
+# 7E) PRINT THE FINAL FIGURE
+# ------------------------------------------------------------------------------
+
+final_combined
+```
+
+
+
+### Boxplot version with the same style as the final barplot figure
+
+```{r, fig.width=16, fig.height=16}
+
+# ==============================================================================
+# Boxplot version with the same style as the final barplot figure
+# Compare raw model distributions vs raw measured fluxes for all species
+# ==============================================================================
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(grid)
+library(ggh4x)
+library(tibble)
+
+# ------------------------------------------------------------------------------
+# 1) PATHS
+# ------------------------------------------------------------------------------
+
+agelas_run_dir     <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260406_105009"
+chondrosia_run_dir <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260406_153814"
+dysidea_run_dir    <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/SMALL_run_20260406_100935"
+
+measured_raw_file  <- "C:/Users/ASUS/Google Drive/PHD/Chapter_4/Energy_budget/Summary_tables/All_3_species_recalc_flux_with_all_volumes/RAW_ALLSPECIES_S6_NEuk_allometric_C_plus_Redfield_N_recalc_flux_allvol.csv"
+
+# ------------------------------------------------------------------------------
+# 2) MANUAL Y-AXIS LIMITS FOR EACH METRIC AND CURRENCY
+# ------------------------------------------------------------------------------
+
+y_limits_tbl <- tribble(
+  ~Currency, ~Metric,                                      ~ymax,
+  "C",       "CO2 release (r16)",                           40,
+  "C",       "Dissolved organic matter assimilation (r2)",  35,
+  "C",       "Planktonic cells assimilation (r1)",          25,
+  
+  "N",       "Dissolved organic matter assimilation (r2)",   8,
+  "N",       "NH4 exchange (r13)",                           4,
+  "N",       "NO3 release (r14)",                            4,
+  "N",       "Planktonic cells assimilation (r1)",           4,
+  
+  "O2",      "Oxygen uptake (r12)",                         70
+)
+
+# ------------------------------------------------------------------------------
+# 3) HELPER: READ AND REBUILD ONE MODEL RUN
+# ------------------------------------------------------------------------------
+# This follows the same logic as your summary-table code:
+# 1) average xsample draws within each accepted_id
+# 2) rebuild accepted_parameter_sets from long to wide
+# 3) join both tables
+# 4) calculate derived variables needed for the final figure
+
+read_model_box_data <- function(run_dir, species_name) {
+  
+  flux_file  <- file.path(run_dir, "accepted_flux_samples.csv")
+  param_file <- file.path(run_dir, "accepted_parameter_sets.csv")
+  
+  # --- read raw files ---
+  df_flux_raw <- read_csv(flux_file, show_col_types = FALSE)
+  df_par_raw  <- read_csv(param_file, show_col_types = FALSE)
+  
+  # --- average flux draws within accepted_id ---
+  df_flux_mean <- df_flux_raw %>%
+    group_by(accepted_id) %>%
+    summarise(
+      BacNupt             = mean(BacNupt, na.rm = TRUE),
+      DONupt              = mean(DONupt, na.rm = TRUE),
+      denit               = mean(denit, na.rm = TRUE),
+      DNRA                = mean(DNRA, na.rm = TRUE),
+      nitr_NH4            = mean(nitr_NH4, na.rm = TRUE),
+      nitr_NO2            = mean(nitr_NO2, na.rm = TRUE),
+      biomassprod_nitrif  = mean(biomassprod_nitrif, na.rm = TRUE),
+      anammox             = mean(anammox, na.rm = TRUE),
+      biomassprod_anammox = mean(biomassprod_anammox, na.rm = TRUE),
+      Prod                = mean(Prod, na.rm = TRUE),
+      tDONupt             = mean(tDONupt, na.rm = TRUE),
+      cOxyupt             = mean(cOxyupt, na.rm = TRUE),
+      cNH4upt             = mean(cNH4upt, na.rm = TRUE),
+      cNO3rel             = mean(cNO3rel, na.rm = TRUE),
+      cNO2upt             = mean(cNO2upt, na.rm = TRUE),
+      CO2rel              = mean(CO2rel, na.rm = TRUE),
+      N2rel               = mean(N2rel, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # --- rebuild parameter table from long to wide ---
+  df_par <- df_par_raw %>%
+    mutate(val = as.numeric(val)) %>%
+    select(accepted_id, name, val) %>%
+    pivot_wider(names_from = name, values_from = val) %>%
+    mutate(
+      fp_C_DOM   = 1 - fr_C_DOM,
+      fp_C_Bac   = 1 - fr_C_Bac,
+      fp_C_Denit = 1 - fr_C_Denit,
+      fp_C_DNRA  = 1 - fr_C_DNRA
+    )
+  
+  # --- join flux means + parameters ---
+  df_model <- df_flux_mean %>%
+    left_join(df_par, by = "accepted_id") %>%
+    mutate(
+      Species = species_name,
+      
+      # direct exchange variables from parameter sets
+      Oxyupt = Oxyupt,
+      NH4upt = NH4upt,
+      NO2upt = NO2upt,
+      NO3rel = NO3rel,
+      DOCupt = DOCupt,
+      BacCupt = BacCupt,
+      
+      # derived variables from your summary code
+      r10_totCprod   = Prod * CN_Spo,
+      r2_CProd_DOC   = DONupt * CN_DOM * fp_C_DOM,
+      r3_CProd_denit = denit  * CN_DOM * fp_C_Denit,
+      r4_CProd_DNRA  = DNRA   * CN_DOM * fp_C_DNRA
+    )
+  
+  # --- map to the same final metric names used in the barplot figure ---
+  model_long <- bind_rows(
+    
+    # Carbon
+    df_model %>%
+      transmute(
+        Species,
+        Replicate_ID = as.character(accepted_id),
+        Metric   = "Planktonic cells assimilation (r1)",
+        Currency = "C",
+        Value    = abs(BacCupt),
+        Source   = "Model"
+      ),
+    
+    df_model %>%
+      transmute(
+        Species,
+        Replicate_ID = as.character(accepted_id),
+        Metric   = "Dissolved organic matter assimilation (r2)",
+        Currency = "C",
+        Value    = abs(DOCupt),
+        Source   = "Model"
+      ),
+    
+    df_model %>%
+      transmute(
+        Species,
+        Replicate_ID = as.character(accepted_id),
+        Metric   = "CO2 release (r16)",
+        Currency = "C",
+        Value    = abs(CO2rel),
+        Source   = "Model"
+      ),
+    
+    # Nitrogen
+    df_model %>%
+      transmute(
+        Species,
+        Replicate_ID = as.character(accepted_id),
+        Metric   = "Planktonic cells assimilation (r1)",
+        Currency = "N",
+        Value    = abs(BacNupt),
+        Source   = "Model"
+      ),
+    
+    df_model %>%
+      transmute(
+        Species,
+        Replicate_ID = as.character(accepted_id),
+        Metric   = "Dissolved organic matter assimilation (r2)",
+        Currency = "N",
+        Value    = abs(DONupt),
+        Source   = "Model"
+      ),
+    
+    df_model %>%
+      transmute(
+        Species,
+        Replicate_ID = as.character(accepted_id),
+        Metric   = "NH4 exchange (r13)",
+        Currency = "N",
+        Value    = abs(NH4upt),
+        Source   = "Model"
+      ),
+    
+    df_model %>%
+      transmute(
+        Species,
+        Replicate_ID = as.character(accepted_id),
+        Metric   = "NO3 release (r14)",
+        Currency = "N",
+        Value    = abs(NO3rel),
+        Source   = "Model"
+      ),
+    
+    # Oxygen
+    df_model %>%
+      transmute(
+        Species,
+        Replicate_ID = as.character(accepted_id),
+        Metric   = "Oxygen uptake (r12)",
+        Currency = "O2",
+        Value    = abs(Oxyupt),
+        Source   = "Model"
+      )
+  )
+  
+  return(model_long)
+}
+
+# ------------------------------------------------------------------------------
+# 4) BUILD MODEL DATA FOR ALL SPECIES
+# ------------------------------------------------------------------------------
+
+model_box_data <- bind_rows(
+  read_model_box_data(agelas_run_dir, "A. oroides"),
+  read_model_box_data(chondrosia_run_dir, "C. reniformis"),
+  read_model_box_data(dysidea_run_dir, "D. avara")
+)
+
+# ------------------------------------------------------------------------------
+# 5) READ RAW MEASURED DATA AND AGGREGATE TO MATCH THE FIGURE LOGIC
+# ------------------------------------------------------------------------------
+# We aggregate at the unique_code level, because each unique_code is one measured
+# replicate. Parameters that belong to the same final metric are summed within
+# unique_code exactly like in your summary logic.
+
+measured_raw <- read_csv(measured_raw_file, show_col_types = FALSE)
+
+measured_box_data <- measured_raw %>%
+  mutate(
+    p_upper = toupper(parameter),
+    
+    Metric = case_when(
+      p_upper %in% c("NEUK_C", "PEUK_C", "PRO_C", "SYN_C",
+                     "NEUK_N", "PEUK_N", "PRO_N", "SYN_N") ~ "Planktonic cells assimilation (r1)",
+      p_upper %in% c("DOC", "DON") ~ "Dissolved organic matter assimilation (r2)",
+      p_upper == "O2"  ~ "Oxygen uptake (r12)",
+      p_upper %in% c("DIC_PH", "DIC") ~ "CO2 release (r16)",
+      p_upper == "NH4" ~ "NH4 exchange (r13)",
+      p_upper %in% c("NOX", "NO3") ~ "NO3 release (r14)",
+      TRUE ~ NA_character_
+    ),
+    
+    Currency = case_when(
+      grepl("_C$|DOC|DIC", p_upper) ~ "C",
+      grepl("_N$|DON|NH4|NOX|NO3", p_upper) ~ "N",
+      p_upper == "O2" ~ "O2",
+      TRUE ~ NA_character_
+    ),
+    
+    Species = case_when(
+      grepl("Agelas", species, ignore.case = TRUE) ~ "A. oroides",
+      grepl("Chondrosia", species, ignore.case = TRUE) ~ "C. reniformis",
+      grepl("Dysidea", species, ignore.case = TRUE) ~ "D. avara",
+      TRUE ~ species
+    )
+  ) %>%
+  filter(!is.na(Metric)) %>%
+  group_by(unique_code, Species, Metric, Currency) %>%
+  summarise(
+    Value = sum(abs(`FluxVol_day (µmol day^-1 cm^-3)`), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  transmute(
+    Species,
+    Replicate_ID = as.character(unique_code),
+    Metric,
+    Currency,
+    Value,
+    Source = "Measured"
+  )
+
+# ------------------------------------------------------------------------------
+# 6) COMBINE + FINAL HARMONIZATION
+# ------------------------------------------------------------------------------
+
+box_df <- bind_rows(model_box_data, measured_box_data) %>%
+  mutate(
+    Species  = factor(Species, levels = c("A. oroides", "C. reniformis", "D. avara")),
+    Source   = factor(Source,  levels = c("Measured", "Model")),
+    Currency = factor(Currency, levels = c("C", "N", "O2"))
+  ) %>%
+  group_by(Metric, Currency) %>%
+  filter(any(Source == "Measured") & any(Source == "Model")) %>%
+  ungroup() %>%
+  mutate(
+    fill_logic = ifelse(
+      Source == "Measured",
+      "white",
+      case_when(
+        Species == "A. oroides"    ~ "#A8D8F0",
+        Species == "C. reniformis" ~ "#BFE3C0",
+        Species == "D. avara"      ~ "#F2D39B"
+      )
+    )
+  )
+
+# ------------------------------------------------------------------------------
+# 7) FUNCTION: MAKE ONE BOXPLOT PANEL
+# ------------------------------------------------------------------------------
+# Same style as your final barplot figure:
+# - white background
+# - no grid
+# - black panel borders
+# - black strip borders
+# - italic species names
+# - measured = white box with colored border
+# - model = filled box with colored fill
+# - manual Y limit for each facet
+
+make_final_boxplot_panel <- function(currency_filter, title_text) {
+  
+  # --------------------------------------------------------------------------
+  # Define explicit facet order for each currency
+  # --------------------------------------------------------------------------
+  metric_order <- case_when(
+    currency_filter == "C"  ~ list(c(
+      "CO2 release (r16)",
+      "Dissolved organic matter assimilation (r2)",
+      "Planktonic cells assimilation (r1)"
+    )),
+    currency_filter == "N"  ~ list(c(
+      "Dissolved organic matter assimilation (r2)",
+      "NH4 exchange (r13)",
+      "NO3 release (r14)",
+      "Planktonic cells assimilation (r1)"
+    )),
+    currency_filter == "O2" ~ list(c(
+      "Oxygen uptake (r12)"
+    ))
+  ) %>% unlist()
+  
+  # --------------------------------------------------------------------------
+  # Keep only relevant data and force Metric order explicitly
+  # --------------------------------------------------------------------------
+  df_plot <- box_df %>%
+    filter(Currency == currency_filter) %>%
+    mutate(
+      Metric = factor(Metric, levels = metric_order)
+    )
+  
+  # --------------------------------------------------------------------------
+  # Keep only relevant manual Y limits and force the SAME order
+  # --------------------------------------------------------------------------
+  metric_limits <- y_limits_tbl %>%
+    filter(
+      Currency == currency_filter,
+      Metric %in% metric_order
+    ) %>%
+    mutate(
+      Metric = factor(Metric, levels = metric_order)
+    ) %>%
+    arrange(Metric)
+  
+  # --------------------------------------------------------------------------
+  # Build one Y scale per facet in the exact facet order
+  # --------------------------------------------------------------------------
+  y_scales_list <- lapply(metric_limits$ymax, function(ymax_val) {
+    scale_y_continuous(limits = c(0, ymax_val))
+  })
+  
+  ggplot(
+    df_plot,
+    aes(
+      x = Species,
+      y = Value,
+      fill = fill_logic,
+      colour = Species,
+      group = interaction(Species, Source)
+    )
+  ) +
+    
+    geom_boxplot(
+      position = position_dodge(width = 0.7),
+      width = 0.6,
+      linewidth = 0.9,
+      outlier.shape = NA
+    ) +
+    
+    facet_wrap(~ Metric, scales = "free_y", ncol = 2) +
+    
+    ggh4x::facetted_pos_scales(
+      y = y_scales_list
+    ) +
+    
+    scale_fill_identity() +
+    
+    scale_colour_manual(values = c(
+      "A. oroides"    = "#A8D8F0",
+      "C. reniformis" = "#BFE3C0",
+      "D. avara"      = "#F2D39B"
+    )) +
+    
+    labs(
+      x = NULL,
+      y = "Flux (µmol day⁻¹ cm⁻³)",
+      title = title_text
+    ) +
+    
+    theme_bw(base_size = 12) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_rect(fill = "white", colour = "black", linewidth = 0.8),
+      plot.background  = element_rect(fill = "white", colour = NA),
+      strip.background = element_rect(fill = "white", colour = "black", linewidth = 0.8),
+      strip.text = element_text(size = 10, colour = "black"),
+      axis.text.x = element_text(size = 12, face = "italic", angle = 0, hjust = 0.5, colour = "black"),
+      axis.text.y = element_text(size = 10, colour = "black"),
+      axis.title.y = element_text(size = 11, colour = "black"),
+      axis.title.x = element_blank(),
+      axis.ticks = element_line(colour = "black"),
+      axis.line = element_blank(),
+      plot.title = element_text(size = 13, face = "bold", colour = "black"),
+      panel.spacing = unit(0.8, "lines"),
+      legend.position = "none"
+    )
+}
+
+# ------------------------------------------------------------------------------
+# 8) CREATE THE THREE PANELS
+# ------------------------------------------------------------------------------
+
+p_C_box  <- make_final_boxplot_panel("C",  "Carbon: Measured vs. Model")
+p_N_box  <- make_final_boxplot_panel("N",  "Nitrogen: Measured vs. Model")
+p_O2_box <- make_final_boxplot_panel("O2", "Oxygen: Measured vs. Model")
+
+# ------------------------------------------------------------------------------
+# 9) MANUAL LEGEND (same style as your final barplot figure)
+# ------------------------------------------------------------------------------
+
+legend_df <- data.frame(
+  x = 1,
+  y = c(3, 2, 1, 0, -1, -2),
+  type = c("Model", "Model", "Model",
+           "Measured", "Measured", "Measured"),
+  species = rep(c("A", "C", "D"), 2)
+)
+
+p_manual_legend_box <- ggplot() +
+  
+  # MODEL = filled squares
+  geom_point(
+    data = subset(legend_df, type == "Model"),
+    aes(x = x, y = y, fill = species),
+    shape = 22,
+    size = 5,
+    stroke = 0.8,
+    colour = "black"
+  ) +
+  
+  # MEASURED = empty squares
+  geom_point(
+    data = subset(legend_df, type == "Measured"),
+    aes(x = x, y = y, colour = species),
+    shape = 22,
+    size = 5,
+    stroke = 1.2,
+    fill = "white"
+  ) +
+  
+  scale_fill_manual(values = c(
+    "A" = "#A8D8F0",
+    "C" = "#BFE3C0",
+    "D" = "#F2D39B"
+  )) +
+  
+  scale_colour_manual(values = c(
+    "A" = "#A8D8F0",
+    "C" = "#BFE3C0",
+    "D" = "#F2D39B"
+  )) +
+  
+  annotate("text", x = 1.4, y =  2, label = "Model",    hjust = 0, size = 4.2) +
+  annotate("text", x = 1.4, y = -1, label = "Measured", hjust = 0, size = 4.2) +
+  
+  xlim(0.8, 2.4) +
+  ylim(-2.5, 3.5) +
+  
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA)
+  )
+
+# ------------------------------------------------------------------------------
+# 10) REMOVE AUTOMATIC LEGENDS
+# ------------------------------------------------------------------------------
+
+p_C_box_clean  <- p_C_box  + theme(legend.position = "none")
+p_N_box_clean  <- p_N_box  + theme(legend.position = "none")
+p_O2_box_clean <- p_O2_box + theme(legend.position = "none")
+
+# ------------------------------------------------------------------------------
+# 11) BUILD BOTTOM ROW
+# ------------------------------------------------------------------------------
+
+bottom_row_box <- ( p_O2_box_clean | p_manual_legend_box | plot_spacer() ) +
+  plot_layout(widths = c(0.5, 0.3, 0.2))
+
+# ------------------------------------------------------------------------------
+# 12) FINAL COMBINED FIGURE
+# ------------------------------------------------------------------------------
+
+final_combined_box <- (
+  p_C_box_clean /
+  p_N_box_clean /
+  bottom_row_box
+) +
+  plot_layout(heights = c(1.35, 1.35, 0.675)) +
+  plot_annotation(tag_levels = "A")
+
+# ------------------------------------------------------------------------------
+# 13) PRINT
+# ------------------------------------------------------------------------------
+
+final_combined_box
+
+
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Chapter_4/Energy_budget/LIM png/final_combined_box.png",
+  plot = final_combined_box,
+  width = 16,
+  height = 16,
+  dpi = 300
+)
+
+ggsave(
+  filename = "C:/Users/ASUS/Google Drive/PHD/Chapter_4/Energy_budget/LIM png/final_combined_box.svg",
+  plot = final_combined_box,
+  width = 16,
+  height = 16,
+  dpi = 300
+)
+
+```
